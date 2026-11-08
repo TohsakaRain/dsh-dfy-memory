@@ -1,10 +1,42 @@
 # 开发流程（作者自己的规矩）
 
-> 2026-11-08 定：**大改必须开分支，版本号命名，验证通过再合回 main。**
+> 2026-11-08 定：
+> 1. **先在运行实例里直接改**（`D:\dfy\qq-bridge\plugins\dsh-dfy-memory`），她身上验证稳定；
+> 2. 稳定之后**整理进这个仓库**，大改要开**版本号命名的分支**，回归通过再合 main。
 
-## 一、日常小修（不需要开分支）
+## 零、先在实例上改（日常开发都在这里）
 
-错别字、注释、README 措辞、一两行的 bug —— 直接在 main 上改：
+真正跑着的插件是 `D:\dfy\qq-bridge\plugins\dsh-dfy-memory`，她用的就是它。
+
+```bash
+# 直接改实例里的代码 → 重启 DSH → 看她用起来对不对
+# 改完先跑实例自己的自检：
+cd D:\dfy\qq-bridge\plugins\dsh-dfy-memory
+node selfcheck.mjs
+```
+
+**稳定的意思**：她实际用了一两天没出问题，或者至少你亲手验证过关键路径。
+
+## 一、整理进仓库
+
+```bash
+cd D:\Workspace\dsh-dfy-memory
+
+# 把实例的代码搬过来（自动跳过没变化的文件）
+node scripts/sync-from-instance.mjs D:/dfy/qq-bridge/plugins/dsh-dfy-memory --dry   # 先看会改哪些
+node scripts/sync-from-instance.mjs D:/dfy/qq-bridge/plugins/dsh-dfy-memory         # 真搬
+```
+
+**不会搬的东西**（各有各的理由）：
+
+| 文件 | 为什么不同步 |
+|---|---|
+| `cordis.patch.yml` | 实例里写的是真实盘符路径；仓库靠 `~/.dsh` 默认值 |
+| `client.js` | 设置页标题：实例「大肥鱼记忆」/ 仓库「AI 记忆」 |
+| `package.json` | 版本号和仓库地址要在仓库里手改 |
+| `README.md` | 更新记录在仓库里写 |
+
+## 二、日常小修（不值得开分支）
 
 ```bash
 git add -A
@@ -12,7 +44,7 @@ git commit -m "fix: 一句话说清改了什么"
 git push
 ```
 
-## 二、一次大改（新功能、行为变更、数据结构调整）
+## 三、一次大改（新功能、行为变更、数据结构调整）
 
 ### 1. 开分支，用版本号命名
 
@@ -67,7 +99,7 @@ git branch -d v0.7.0
 git push origin --delete v0.7.0             # 远端那份也删
 ```
 
-## 三、出问题要回滚
+## 四、出问题要回滚
 
 ```bash
 git checkout main
@@ -77,7 +109,7 @@ git push
 
 别用 `reset --hard` 推上去 —— 别人 clone 过的仓库会被搞坏。
 
-## 四、版本号怎么定
+## 五、版本号怎么定
 
 | 变化 | 版本 |
 |---|---|
@@ -85,7 +117,7 @@ git push
 | 只修 bug、不动对外行为 | `0.X.Y`（修订 +1） |
 | 破坏性改名、数据格式不兼容 | `1.0.0` 或 `0.X.0` 并在 README 写明迁移 |
 
-## 五、提交信息格式（简单够用）
+## 六、提交信息格式（简单够用）
 
 ```
 feat: 新增邮箱（dfy_mail_send / list / read）
@@ -95,7 +127,7 @@ refactor: 把窗口裁剪拆成 smartTrim
 test: 补草稿→定稿的用例
 ```
 
-## 六、提交前自查
+## 七、提交前自查
 
 ```bash
 git status --short                          # 确认没有 data/ 之类的私人文件混进来
