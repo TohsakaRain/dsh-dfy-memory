@@ -1,0 +1,33 @@
+# ============================================================================
+# dsh-dfy-memory —— 人格数据层插件（骨架版）
+# ============================================================================
+# 这一版**只搬运数据与算法**：长期记忆（分层 + 遗忘曲线）、心情/好感度、
+# 承诺。它**不注册任何工具**，也不往任何 prompt 里注入东西 —— 装上等于没装，
+# 唯一的可见效果是启动日志里多一行 "[dsh-dfy-memory] 已加载"。
+#
+# 为什么先生成一个"什么都不做"的插件：
+#   1. 把打包/加载这条路先跑通（package.json → bundle patch → 插件 apply）
+#   2. 数据层可以独立自检（selfcheck.mjs），不依赖 DSH、不依赖桥接
+#   3. 后面两步（工具搬迁、注入搬迁）才有地方落，且每一步都能单独回滚
+#
+# 后续步骤（未做）：
+#   · 注册工具：memory_save/recall/touch/update/forget/stats、mood/affinity、
+#     promise/promises/drop
+#   · 注入：agent/pre-step 或在桥接里读本插件导出的 renderInjection()
+#   · 两者都接好之后，把宿主里那几段旧实现删掉
+# ============================================================================
+
+- insert:
+    - id: dfy-memory
+      name: dsh-dfy-memory
+      config:
+        # 默认数据目录：~/.dsh/dsh-dfy-memory/（跟第三方 DSH 插件一致，落在用户目录下）
+        #   memory/ diary/ state/ works/ mailbox/ context/
+        # 一般**不用改这里**。要换地方，两种办法（二选一）：
+        #   1) 环境变量 DFY_DATA_DIR=D:\my\dsh-data
+        #   2) 取消下面注释，写绝对路径
+        # memoryDir: 'D:/my/dsh-data/memory'
+        # diaryDir:  'D:/my/dsh-data/diary'
+        # stateDir:  'D:/my/dsh-data/state'
+        # worksDir:  'D:/my/dsh-data/works'
+        enabled: true

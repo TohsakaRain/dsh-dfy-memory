@@ -1,0 +1,56 @@
+{
+  "name": "dsh-dfy-memory",
+  "version": "0.6.3",
+  "description": "DSH 插件：给 AI 伴侣一套会淡忘的人格数据层（心情/好感度、长期记忆、承诺、日记、对话窗口、作品库·草稿/定稿/归档、邮箱），带 36 个工具和一个设置页",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./lib/memory-store.js": "./lib/memory-store.js",
+    "./lib/emotion.js": "./lib/emotion.js",
+    "./lib/commitments.js": "./lib/commitments.js",
+    "./lib/diary.js": "./lib/diary.js",
+    "./lib/mailbox.js": "./lib/mailbox.js"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "lib",
+    "README.md",
+    "LICENSE",
+    "selfcheck.mjs"
+  ],
+  "engines": {
+    "dsh": ">=0.1.7-rc.1",
+    "node": ">=22"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "ai-companion",
+    "memory",
+    "diary",
+    "emotion"
+  ],
+  "license": "MIT",
+  "author": "TohsakaRain",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YOUR_GITHUB/dsh-dfy-memory.git"
+  },
+  "homepage": "https://github.com/YOUR_GITHUB/dsh-dfy-memory#readme",
+  "bugs": {
+    "url": "https://github.com/YOUR_GITHUB/dsh-dfy-memory/issues"
+  },
+  "scripts": {
+    "test": "node selfcheck.mjs"
+  }
+}
