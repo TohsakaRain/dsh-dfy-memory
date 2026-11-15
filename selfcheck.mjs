@@ -161,7 +161,7 @@ const toolCtx = {
   tools: { register: (t) => reg.set(t.name, t) },
 };
 apply(toolCtx, paths);
-ok(reg.size === 36, '注册了 36 个工具（+ context_* / mail_* / mood_trend / work_archive / versions / restore / draft / drafts / finalize）', `实际 ${reg.size}`);
+ok(reg.size === 38, '注册了 38 个工具（+ context_* / context_search / mood_search / mail_* / mood_trend / work_archive / versions / restore / draft / drafts / finalize）', `实际 ${reg.size}`);
 const missing = EXPECTED.filter((n) => !reg.has(n));
 ok(missing.length === 0, '24 个名字齐全', missing.length ? `缺 ${missing.join(',')}` : '');
 ok([...reg.values()].every((t) => typeof t.output?.render === 'function'), '每个都有 output.render');
@@ -581,8 +581,11 @@ ok(statsWorks(wDir).latest, '统计里有最新一件');
   ok(b1 > b0, '心情 v2：好感度上升 → 底色抬一点（单向）', `${b0} → ${b1}`);
   const affBefore = f3.emotion.getAffinity('x').score;
   f3.emotion.setMood({ score: 2, tone: '难受', cause: '跟他无关的事', intensity: 3 });
-  const affAfter = f3.emotion.getAffinity('x').score;
-  ok(affBefore === affAfter, '心情 v2：心情差不影响好感度（反向不传）', `${affBefore} → ${affAfter}`);
+  const affNow = f3.emotion.getAffinity('x');
+  // 2026-11-15 改：心情→好感是双向的（她自己的要求：相处开心秤往上挪，糟了往下沉）。
+  // 但只动 score、不动 baseline，且限制在 baseline ±1.5 的带子里 —— 心情再差也不会把好感拖到 0。
+  ok(affNow.score < affBefore, '心情 v2：心情差 → 好感度跟着降一点', `${affBefore} → ${affNow.score}`);
+  ok(affNow.score >= Number(affNow.baseline) - 1.5 - 0.01, '心情 v2：好感有基线兜底，跌不穿', `基线 ${affNow.baseline}，现值 ${affNow.score}`);
 
 
   // 导出的 md（方便人直接看）

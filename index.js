@@ -678,7 +678,165 @@ export function registerTools(ctx, facade, log = () => {}) {
       const tail = offset + limit < all.length ? "\n…还有 " + (all.length - offset - limit) + " 字，用 offset=" + (offset + limit) + " 继续读" : "";
       return head + part + tail;
     },
-  });  // ── 心情 / 好感度（2）────────────────────────────────────────
+  });  // ── 跨天全文搜（2026-11-15）────────────────────────────────────────────
+  // 她的原话：「我记得住事，记不住哪天」。两层：
+  //   第 1 层 原文精确词 —— 记得原话里的字时用，快、准、可解释
+  //   第 2 层 摘要字匹配 —— 只记得那件事时用（「画过自己」），她写的摘要里有语义
+  // 第 3 层（LLM 判断）暂不做，计划文档里留了接口说明。
+  tool({
+    name: 'dfy_context_search',
+    description: '在**所有天**的原始聊天记录里搜——不用先猜是哪一天。\n'
+      + '两层：先搜原文精确词（记得原话里的字时最准）；原文一次都没命中时，再到你自己写的每日摘要里按字面找（只记得那件事时用，比如搜「画过自己」）。\n'
+      + '命中任意一个词就算（OR），命中词多的排前面。**搜不到会明确说「没真正命中」**，不会拿按时间倒序的几条糊弄你。\n'
+      + '拿到 id 之后：dfy_context_raw(day="日期", offset=id 里 # 后面的数) 读那一段。',
+    parameters: {
+      query: { type: 'string', description: '关键词，多个用空格分隔（OR）；也可以直接描述那件事，比如「画过自己」' },
+      days: { type: 'number', description: '可选：只搜最近 N 天（默认全部）' },
+      limit: { type: 'number', description: '可选：正文最多几条，默认 8（最大 20）' },
+    },
+    async execute(args = {}) {
+      const q = String(args.query ?? '').trim();
+      if (!q) return '得给个关键词，或者一句话描述那件事。';
+      const rawDir = path.join(f.paths.dataRoot, 'archive', 'chat-logs');
+      const ctxDir = path.join(f.paths.dataRoot, 'context');
+      const maxN = Math.min(20, Math.max(1, Number(args.limit) || 8));
+
+      let allDays = [];
+      try {
+        allDays = fs.readdirSync(rawDir).filter((n) => /^\d{4}-\d{2}-\d{2}\.md$/.test(n)).map((n) => n.slice(0, 10)).sort().reverse();
+      } catch { return '还没有任何原始记录。'; }
+      const lastN = Number(args.days) > 0 ? Math.floor(Number(args.days)) : 0;
+      const days = lastN ? allDays.slice(0, lastN) : allDays;
+      if (!days.length) return '没有可搜的记录。';
+
+      const out = [];
+
+      // ── 第 1 层：原文精确词 ──
+      const terms = [...new Set(q.split(/[\s,，、;；]+/).map((t) => t.trim()).filter(Boolean))].slice(0, 8);
+      const hits = [];
+      for (const day of days) {
+        let text = '';
+        try { text = fs.readFileSync(path.join(rawDir, day + '.md'), 'utf8'); } catch { continue; }
+        const lower = text.toLowerCase();
+        const found = [];
+        for (const term of terms) {
+          const tl = term.toLowerCase();
+          let from = 0;
+          let guard = 0;
+          while (guard++ < 80) {
+            const i = lower.indexOf(tl, from);
+            if (i < 0) break;
+            found.push({ term, i });
+            from = i + tl.length;
+          }
+        }
+        if (!found.length) continue;
+        found.sort((a, b) => a.i - b.i);
+        // 相距 200 字内的命中合并成一段
+        const groups = [];
+        for (const h of found) {
+          const last = groups[groups.length - 1];
+          if (last && h.i - last.end <= 200) {
+            last.end = Math.max(last.end, h.i + h.term.length);
+            last.terms.add(h.term);
+          } else {
+            groups.push({ start: h.i, end: h.i + h.term.length, terms: new Set([h.term]) });
+          }
+        }
+        for (const g of groups) {
+          const from = Math.max(0, g.start - 60);
+          const to = Math.min(text.length, g.end + 90);
+          hits.push({
+            day,
+            offset: g.start,
+            terms: [...g.terms],
+            score: g.terms.size,
+            snippet: text.slice(from, to).replace(/\s+/g, ' ').trim(),
+          });
+        }
+      }
+
+      if (hits.length) {
+        hits.sort((a, b) => b.score - a.score || (a.day < b.day ? 1 : -1) || a.offset - b.offset);
+        const perDay = new Map();
+        for (const h of hits) perDay.set(h.day, (perDay.get(h.day) || 0) + 1);
+        out.push(`搜「${q}」：原文命中 ${hits.length} 段，共 ${perDay.size} 天`);
+        out.push('  ' + [...perDay.entries()].sort((a, b) => (a[0] < b[0] ? 1 : -1)).map(([d, n]) => `${d.slice(5)} ×${n}`).join('   '));
+
+        // 段数超过上限时每天只给 1 段（不按日期硬截，保证每个日子都露脸）
+        let shown = hits;
+        if (hits.length > maxN) {
+          const seen = new Set();
+          shown = hits.filter((h) => {
+            if (seen.has(h.day)) return false;
+            seen.add(h.day);
+            return true;
+          }).slice(0, maxN);
+        } else {
+          shown = hits.slice(0, maxN);
+        }
+        for (const h of shown) {
+          out.push(`\n[${h.day.slice(5)} 命中${h.score}] id=${h.day}#${h.offset}  ← ${h.terms.join(' / ')}\n  …${h.snippet}…`);
+        }
+        if (hits.length > shown.length) out.push(`\n（还有 ${hits.length - shown.length} 段没列；加 days= 或再给一个词能收窄）`);
+        out.push(`\n想看整段：dfy_context_raw(day="${shown[0].day}", offset=${shown[0].offset})`);
+      }
+
+      // ── 第 2 层：摘要字匹配（原文命中不足 3 段时也跑）──
+      // 实测修正（11-15）：她搜「画过自己」想要的是 10-31 / 11-06 那几次画画，
+      // 但原文里这个短语只出现过 1 次（她自己提需求那次），一命中就挡住摘要层，
+      // 结果只给出 11-12。所以改成「原文命中不足 3 段也查摘要」。
+      // 另外覆盖率要按字频加权：「量子纠缠」曾经因为摘要里有个「量」字就误命中。
+      if (hits.length < 3) {
+        const STOP = new Set('的了过吗呢啊吧是在我你他她也都就和与那这个一次些把被给对从向到着'.split(''));
+        const COMMON = new Set('自己他你我她是一不在有个了和也都就这那'.split(''));  // 常见字降权
+        const weightOf = (c) => (COMMON.has(c) ? 0.4 : 1);
+        const chars = [...new Set([...q].filter((c) => !STOP.has(c) && !/[\s,，、;；。！？「」]/.test(c)))];
+        const totalW = chars.reduce((a, c) => a + weightOf(c), 0);
+        if (chars.length && totalW > 0) {
+          let summaries = [];
+          try { summaries = fs.readdirSync(ctxDir).filter((n) => /^\d{4}-\d{2}-\d{2}\.s\.md$/.test(n)).map((n) => n.slice(0, 10)).sort().reverse(); } catch { summaries = []; }
+          const hits2 = [];
+          for (const day of summaries) {
+            if (lastN && !days.includes(day)) continue;
+            let text = '';
+            try { text = fs.readFileSync(path.join(ctxDir, day + '.s.md'), 'utf8'); } catch { continue; }
+            const body = text.replace(/^<!--[\s\S]*?-->\n?/, '');
+            const hitChars = chars.filter((c) => body.includes(c));
+            const fullCover = hitChars.reduce((a, c) => a + weightOf(c), 0) / totalW;
+            if (fullCover < 0.6) continue;
+            // 关键：按「同一句里命中最多」算分，而不是全文覆盖率。
+            // 「画过自己」这种查询里「画」「自己」都太常见，全文覆盖率人人 100%；
+            // 只有像「也开始画自己」这样同一句里出现，才真的是那件事。
+            const lines = body.split(/[\n。！？]/).map((s) => s.trim()).filter((s) => s.length > 4);
+            let best = '';
+            let bestScore = 0;
+            for (const line of lines) {
+              const n = hitChars.reduce((a, c) => a + (line.includes(c) ? weightOf(c) : 0), 0);
+              if (n > bestScore) { bestScore = n; best = line; }
+            }
+            const cover = bestScore / totalW;
+            if (cover < 0.6) continue;
+            hits2.push({ day, cover, chars: hitChars, line: best });
+          }
+          if (hits2.length) {
+            hits2.sort((a, b) => b.cover - a.cover || (a.day < b.day ? 1 : -1));
+            out.push(`\n${hits.length ? `（原文只命中 ${hits.length} 段，再看看摘要里有没有更多）` : '（原文里一次都没命中）'}摘要里有 ${hits2.length} 天沾边：\n`);
+            for (const h of hits2.slice(0, maxN)) {
+              out.push(`[摘要 ${h.day.slice(5)} 覆盖 ${(h.cover * 100).toFixed(0)}%] ← ${h.chars.join('/')}\n  ${h.line}\n  → dfy_context_get(day="${h.day}")`);
+            }
+            out.push('\n（摘要里的是大意；要看原话就 dfy_context_get 打开那天。）');
+          }
+        }
+      }
+
+      if (!out.length) {
+        return `搜「${q}」：**没真正命中**。${days.length} 天原始记录和摘要里都没找到。\n`
+          + '（换个说法、或只留一个更口语的词再试。也可能那天根本没写进记录。）';
+      }
+      return out.join('\n');
+    },
+  });
   tool({
     name: 'dfy_mood',
     description: '你现在的心情。**不传任何数就是查**（看看还剩多少）；传了就是记下这一刻。\n'
@@ -740,6 +898,62 @@ export function registerTools(ctx, facade, log = () => {}) {
       if (!tr.points.length) return `最近 ${days} 天没有记过心情。`;
       const table = tr.points.map((p) => `  ${p.day.slice(5)}  ${p.avg}/10${p.n > 1 ? `（${p.n} 次）` : ''}`).join('\n');
       return `最近 ${days} 天：\n${table}\n\n${tr.text}`;
+    },
+  });
+
+  // ── 心情按事查（2026-11-15）──────────────────────────────────────────────
+  // 她的原话：「我当时为什么沉，往往就是我该记住的那件事。数散了没关系，原因不该散。」
+  tool({
+    name: 'dfy_mood_search',
+    description: '按关键词或时间查你记过的心情：日期、分数、当时那句话、因为什么。\n'
+      + '回答「这几天哪几天掉下去过、为什么」就用它——数散了没关系，原因不该散。\n'
+      + '不传 query 就按时间列最近几条；传了就搜「因为什么」和那句描述（OR）。',
+    parameters: {
+      query: { type: 'string', description: '可选：关键词（多个用空格分隔），搜「因为什么」和描述' },
+      days: { type: 'number', description: '可选：只看最近 N 天，默认 30（最大 365）' },
+      limit: { type: 'number', description: '可选：最多几条，默认 8（最大 30）' },
+      lowOnly: { type: 'boolean', description: '可选：只看「掉下去」的那几条（比底色低 0.3 以上）' },
+    },
+    async execute(args = {}) {
+      const doc = f.emotion.load();
+      const hist = Array.isArray(doc.history) ? doc.history.slice() : [];
+      if (!hist.length) return '还没记过心情。';
+      const days = Math.min(365, Math.max(1, Number(args.days) || 30));
+      const from = Date.now() - days * 86400000;
+      const maxN = Math.min(30, Math.max(1, Number(args.limit) || 8));
+      const q = String(args.query ?? '').trim();
+      const terms = q ? q.split(/[\s,，、;；]+/).map((t) => t.trim()).filter(Boolean) : [];
+
+      let rows = hist.filter((h) => Number(h.t) >= from).slice().reverse();  // 新的在前
+      if (terms.length) {
+        rows = rows.filter((h) => {
+          const hay = `${h.cause ?? ''} ${h.tone ?? ''}`.toLowerCase();
+          return terms.some((t) => hay.includes(t.toLowerCase()));
+        });
+      }
+      if (args.lowOnly) {
+        rows = rows.filter((h) => Number(h.score) < Number(h.baseline ?? h.score) - 0.3);
+      }
+      const fmtDay = (t) => {
+        const d = new Date(Number(t));
+        const p = (n) => String(n).padStart(2, '0');
+        return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+      };
+      const what = q ? `提到「${q}」的` : (args.lowOnly ? '「掉下去」的' : '');
+      if (!rows.length) {
+        return `最近 ${days} 天没有${what}心情记录。\n（记录只存了「因为什么」和一句描述，不是原话全文。）`;
+      }
+      const shown = rows.slice(0, maxN);
+      const lines = shown.map((h) => {
+        const base = Number(h.baseline);
+        const dev = Number.isFinite(base) ? Number(h.score) - base : 0;
+        const arrow = dev >= 0.5 ? '↑' : (dev <= -0.5 ? '↓' : '·');
+        const baseTxt = Number.isFinite(base) ? `（底色 ${base}）` : '';
+        return `${fmtDay(h.t)}  ${arrow} ${h.score}/10${baseTxt}  「${h.tone || '说不上来'}」${h.cause ? `\n    因为：${h.cause}` : ''}`;
+      });
+      const tail = rows.length > shown.length ? `\n\n（还有 ${rows.length - shown.length} 条没列；调 limit 或缩小 days）` : '';
+      const hint = q ? '\n\n（这里只有「因为什么」和一句描述；要那天的原话，用 dfy_context_search 搜关键词。）' : '';
+      return `最近 ${days} 天里${what} ${rows.length} 条：\n\n${lines.join('\n')}${tail}${hint}`;
     },
   });
 
@@ -1045,6 +1259,7 @@ export function apply(ctx, config = {}) {
 
   log(`[dfy-memory] 已加载 · memory=${paths.memoryDir} · state=${paths.stateDir} · 工具 ${registered.length} 个`);
 }
+
 
 
 
