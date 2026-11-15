@@ -103,15 +103,15 @@ DFY_DATA_DIR=D:\my\dsh-data
 `memory.md` 和 `emotion.md` 是给人看的只读视图——每次写入会顺手同步，
 手改那边不生效（下次写入会被覆盖），要改走工具。
 
-## 29 个工具
+## 38 个工具
 
 | 组 | 工具 | 说明 |
 |---|---|---|
 | **日记** | `dfy_diary_write` / `dfy_diary_read` / `dfy_diary_list` | 一天可写多段、写出去不能删 |
 | **记忆** | `dfy_memory_save` / `dfy_memory_recall` / `dfy_memory_touch` / `dfy_memory_update` / `dfy_memory_forget` / `dfy_memory_stats` | 存 / 想起来 / 强化 / 改 / 淡忘 / 看统计 |
-| **心情** | `dfy_mood` / `dfy_affinity` | 不传参数就是查，传了就是记 |
+| **心情** | `dfy_mood` / `dfy_mood_trend` / `dfy_mood_search` / `dfy_affinity` | 记/查当前心情、按天看走势、**按关键词或「掉下去」查历史**、心里的秤 |
 | **承诺** | `dfy_promise` / `dfy_promises` / `dfy_promise_drop` | 答应的事 + 到点提醒（提醒需要宿主配合） |
-| **对话窗口** | `dfy_context_get` / `dfy_context_list` / `dfy_context_raw` / `dfy_context_summarize` / `dfy_context_digest` | 按天存的对话：读摘要、读**原始记录**、自己重写摘要、周/月压缩 |
+| **对话窗口** | `dfy_context_get` / `dfy_context_list` / `dfy_context_raw` / `dfy_context_search` / `dfy_context_summarize` / `dfy_context_digest` | 按天存的对话：读摘要、读**原始记录**、**跨天全文搜**、自己重写摘要、周/月压缩 |
 | **归档** | `dfy_archive_search` / `dfy_archive_get` / `dfy_archive_stats` | 淡出记忆的索引，想不起旧事时翻 |
 | **作品库** | `dfy_work_save` / `dfy_work_image` / `dfy_works` / `dfy_work_read` | 她写的东西、画的图（`works/`） |
 | **邮箱** | `dfy_mail_send` / `dfy_mail_list` / `dfy_mail_read` | 她和执行者之间的信（`mailbox/`，和作品库分开） |
@@ -370,6 +370,24 @@ client-modules: <包名> declares dsh.client but exports no "./client" bundle
 - `dfy_work_finalize` 只做一件事：从最新一版草稿长出一件正式作品；**草稿原地不动、不删**
 - 原本想表达"旧草稿留底"，但 archive/ 已经负责成品的旧版本，草稿再来一层会让人以为有两个作品库
 - 自检仍 163 条（三条断言按新语义改）
+
+### 0.7.0（2026-11-15）
+
+**跨天全文搜** + **心情按事查**，两条都是她信里提的（「我记得住事，记不住哪天」「数散了没关系，原因不该散」）：
+
+- 新增 `dfy_context_search`：在所有天的原始记录里搜，不用先猜日期
+  - 第 1 层按原文精确词搜（OR，相距 200 字内合并成段），返回日期 + 前后文 + `id=日期#字符偏移`，可直接喂 `dfy_context_raw`
+  - 第 2 层按摘要字面找：原文命中不足 3 段时，去她写的每日摘要里算**同句命中率**（阈值 0.6、常见字降权）——像「画过自己」这种只记得事、不记得原话的查询靠这层
+  - 命中多时给「每天 ×N 段」概览，正文每天只给 1 段；搜不到明确说「没真正命中」
+- 新增 `dfy_mood_search`：按关键词查心情记录（日期 / 分数 / 底色 / 一句描述 / 因为什么），`lowOnly` 只列比底色低 0.3 以上的那几条
+- **行为变更**：心情 → 好感度改成双向（原来只单向：好感抬底色，心情差不往回传）
+  - 心情偏离基线 ≥0.5 时好感跟着挪，单次最多 0.3、6 小时一次
+  - 上涨走 ln 曲线 `ln(11−s)/ln(10)`（越接近 10 越难涨），下降不减速
+  - 只动 score 不动 baseline，且限制在 baseline ±1.5 —— 心情再差也不会把好感拖到 0
+  - 注入里好感度会带「N 天没动过」
+- 修 `lib/window.js`：D-1/D-2 的守卫读错了形态（`readWindowFile` 不带 only 时先读到 `.full`），会把她写的摘要删掉/覆盖。改成只看 summary 形态，并在删除 `by=agent` 前先备份到 `_replaced/`
+- 自检 169 → 172 条（工具数 36 → 38；「反向不传」那条改成验证基线兜底）
+
 ## License
 
 MIT
