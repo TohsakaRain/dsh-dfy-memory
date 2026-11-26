@@ -263,7 +263,7 @@ GET http://127.0.0.1:<DSH端口>/api/dfy-memory/prompt-block
 ## 自检
 
 ```powershell
-node selfcheck.mjs     # 386 项，全用临时目录，不碰真实数据
+node selfcheck.mjs     # 391 项，全用临时目录，不碰真实数据
 ```
 
 覆盖：路径解析、记忆（写入/判重/召回/分层/touch/恢复原文/渲染/注入文本/生命周期）、
@@ -470,9 +470,20 @@ node selfcheck.mjs     # 386 项，全用临时目录，不碰真实数据
 - 心情那块的好感度需要"对谁"(`who`)，从桥接 `config.json` 的 `ownerQQ` 取
 - 自检 362 → **386**（内容块 24 条）
 
+### 0.11.1（2026-11-26）
+
+- **设置页「注入」tab 精简**：三张卡并成两张，状态只留 2 行（开关来源 / 已挂载会话），
+  order / refreshMs / presets / cwdContains / parts 全收进**默认收起**的「高级参数」；
+  原来那张「别的桥接怎么接」的说明卡移到 README（页面只留必要信息）
+- **修一个跨机器的坑**：memoryDir(cfg) 的兜底原来写死 `D:\dfy\memory` —— 换台机器、或者
+  外部自己 createMemoryFacade 没传 cfg 时，会**静默读空库**（注入只剩一行提示）。
+  现在兜底跟 resolvePaths 的默认一致（`~/.dsh/dsh-dfy-memory/memory`），并且也认
+  cfg.memoryDir / cfg.paths.memoryDir
+- 自检 386 → **391**（memoryDir 解析 5 条）
+
 ## 版本
 
-**0.11.0**（自注入可注入五块内容；设置页「注入」tab 全部参数热生效）。仓库每个版本一条分支（`0.7.0`、`0.8.0`、`0.8.1`…）加一个同名 tag（`v0.8.1`），
+**0.11.1**（自注入五块内容可开关；「注入」tab 精简成两卡）。仓库每个版本一条分支（`0.7.0`、`0.8.0`、`0.8.1`…）加一个同名 tag（`v0.8.1`），
 `git diff v0.8.0 v0.8.1` 就是两版之间的全部差异。发布流程见 `CONTRIBUTING.md`。
 
 ## License

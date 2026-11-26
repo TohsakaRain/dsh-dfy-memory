@@ -16,7 +16,7 @@ import path from 'node:path';
 import { apply, createMemoryFacade, resolvePaths, describePaths, DEFAULT_DATA_ROOT, wireSelfInject } from './index.js';
 import { DEFAULT_SELF_INJECT, createSnapshotProvider, matchesSession, normalizeSelfInject, readSelfInjectFile, resolveSelfInject, writeSelfInjectFile } from './lib/inject-self.js';
 import { SELF_INJECT_PARTS, normalizeParts, diaryLine, promisesLine, timeLine, composeSelfInject } from './lib/inject-parts.js';
-import { recallForPrompt, renderMarkdown } from './lib/memory-store.js';
+import { recallForPrompt, renderMarkdown, memoryDir } from './lib/memory-store.js';
 import { relateDirs, probeDataRoot, listDir, looksLikeBridgeConfig } from './lib/webapi.mjs';
 import {
   TUNING_SPEC, TUNING_DEFAULTS, readTuning, writeTuning, validatePatch, toCfg,
@@ -1325,6 +1325,19 @@ console.log('\n[O] 自注入的内容块（日记/记忆/心情/承诺/时间感
   ok(moodOnly === '', '块返回空串 → 整段为空');
   const broken = composeSelfInject({ parts: ['memory', 'diary'], now: NOW, facade: { memory: { forPrompt: () => '【你记得的事】\n- ok' }, diary: { status: () => { throw new Error('坏了'); } } } });
   ok(broken.includes('【你记得的事】'), '某块抛错不影响别的块');
+}
+
+console.log('\n[P] memoryDir 的解析（跨机器不能靠写死路径）');
+{
+  const byMemoryDir = memoryDir({ memory: { dir: 'D:/a/memory' } });
+  const byTop = memoryDir({ memoryDir: 'D:/b/memory' });
+  const byPaths = memoryDir({ paths: { memoryDir: 'D:/c/memory' } });
+  const def = memoryDir({});
+  ok(byMemoryDir === path.resolve('D:/a/memory'), 'cfg.memory.dir 优先', byMemoryDir);
+  ok(byTop === path.resolve('D:/b/memory'), '也认 cfg.memoryDir', byTop);
+  ok(byPaths === path.resolve('D:/c/memory'), '也认 cfg.paths.memoryDir', byPaths);
+  ok(path.isAbsolute(def) && def.includes('dsh-dfy-memory'), '没传 cfg → 落到用户目录下的默认根', def);
+  ok(!/^[A-Za-z]:\\?dfy\\memory$/i.test(def), '兜底不再写死 D:\\dfy\\memory', def);
 }
 
 console.log(`\n通过 ${pass} / 失败 ${fail}`);
