@@ -4,7 +4,7 @@
  * v0.2（2026-10-28）：从"骨架"升级为"工具可用"
  *   · 数据层：记忆 / 心情·好感 / 承诺 / 日记（lib/ 下四个纯模块）
  *   · 工具层：14 个 DSH 原生工具（dfy_ 前缀），与旧的 MCP 工具**并存**
- *   · 注入层：**还没做**（第 ④ 步；桥接现在自己拼，靠 injection.source 切换）
+ *   · 注入层：桥接自己拼（读同一批数据文件）；插件另提供只读路由 /api/dfy-memory/prompt-block
  *
  * 为什么并存而不是替换：
  *   迁移期最怕"旧的删了、新的没接好 ⇒ 她突然不会用了"。所以旧的一律保留，
@@ -33,6 +33,7 @@ import {
   touchMany, exportMarkdown,
 } from './lib/memory-store.js';
 import { mailboxDir, sendLetter, listLetters, readLetter, mailStats } from './lib/mailbox.js';
+import { DEFAULT_SELF_INJECT, createSnapshotProvider, matchesSession } from './lib/inject-self.js';
 import { searchArchive, getArchive, statsArchive, archiveHint } from './lib/archive.js';
 import { listWindow, readWindowFile, rollWindow, summarizeDay, windowHint, contextDir, debugInfo as windowDebugInfo } from './lib/window.js';
 import { extractEvents } from './lib/chatlog.js';
@@ -57,7 +58,7 @@ import {
 export const name = 'dfy-memory';
 
 // 注册工具要 tools；设置页要 webServer。
-export const inject = ['tools', 'webServer'];
+export const inject = ['tools', 'webServer', 'systemPrompt'];
 
 // 数据默认放在用户目录下（和 douyin-browser 等第三方插件一致）：
 //   ~/.dsh/dsh-dfy-memory/
@@ -1530,6 +1531,58 @@ export function registerTools(ctx, facade, log = () => {}) {
  * 行为：解析路径 → 建门面 → 注册工具（可用性交给守卫的开关）。
  * 不写任何文件（数据只在工具被调用时才动），不影响现有功能。
  */
+/**
+ * 自注入：把记忆块挂进 system prompt 末尾。
+ * 默认不调用——apply 里只有 config.selfInject.enabled === true 才会进来。
+ *
+ * 刷新节奏对齐 QQ 桥接（每条消息算一次，同一轮里不重复算）：
+ *   agent/inbox/spliced（有新输入）→ 标脏 → 下一次 assembly 重算 → 这一轮后续步都用快照；
+ *   另有 refreshMs 兜底，长时间挂机时慢慢追上淡忘变化。
+ */
+export function wireSelfInject(ctx, cfg = {}, facade, log = () => {}) {
+  const provider = createSnapshotProvider({
+    getBlock: () => facade.memory.forPrompt(),
+    refreshMs: Number(cfg.refreshMs) || DEFAULT_SELF_INJECT.refreshMs,
+  });
+
+  const onCreated = (payload = {}) => {
+    const agent = payload?.agent;
+    if (!agent?.ctx) return;
+    try {
+      const sess = agent.session || {};
+      const preset = String(sess.header?.agentPreset ?? sess.meta?.agentPreset ?? '');
+      const cwd = String(sess.header?.cwd ?? sess.meta?.cwd ?? '');
+      if (!matchesSession({ preset, cwd }, cfg)) return;
+      if (typeof agent.ctx.systemPrompt?.section !== 'function') {
+        log('[dfy-memory] 这个 agent 没有 systemPrompt 服务，自注入跳过');
+        return;
+      }
+      const attach = () => {
+        agent.ctx.systemPrompt.section({
+          name: 'dfy:memory',
+          order: Number(cfg.order) || DEFAULT_SELF_INJECT.order,
+          text: () => provider.text(),
+        });
+        if (typeof agent.ctx.on === 'function') agent.ctx.on('agent/inbox/spliced', () => provider.markDirty());
+        return () => { /* section 与监听都归 agent.ctx，随 agent 销毁自动摘掉 */ };
+      };
+      if (typeof agent.ctx.effect === 'function') agent.ctx.effect(attach);
+      else attach();
+      log(`[dfy-memory] 自注入已挂到 ${String(agent.id ?? '?')}（preset=${preset || '任意'}）`);
+    } catch (error) {
+      log(`[dfy-memory] 自注入挂载失败：${error?.message ?? error}`);
+    }
+  };
+
+  if (typeof ctx?.on !== 'function') {
+    log('[dfy-memory] 没有事件服务，自注入跳过');
+    return false;
+  }
+  ctx.on('agent/created', onCreated);
+  log('[dfy-memory] 自注入已开启（system prompt 末尾；按 inbox 变化刷新）');
+  return true;
+}
+
 export function apply(ctx, config = {}) {
   const paths = resolvePaths(config);
   const log = (msg) => {
@@ -1553,6 +1606,17 @@ export function apply(ctx, config = {}) {
     registered = registerTools(ctx, facade, log);
   } else {
     log('[dfy-memory] 没有 tools 服务，跳过工具注册（数据层仍可用）');
+  }
+
+  // 自注入（默认关）：开了才把记忆块挂进 system prompt，注入频率对齐桥接。
+  {
+    const selfCfg = { ...DEFAULT_SELF_INJECT, ...(config?.selfInject ?? {}) };
+    if (selfCfg.enabled === true) {
+      try { wireSelfInject(ctx, selfCfg, facade, log); }
+      catch (error) { log(`[dfy-memory] 自注入启用失败：${error?.message ?? error}`); }
+    } else {
+      log('[dfy-memory] 自注入未开启（config.selfInject.enabled）：注入归宿主，宿主取 GET /api/dfy-memory/prompt-block');
+    }
   }
 
   // 设置页的后端：/api/dfy-memory/*

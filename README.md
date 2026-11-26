@@ -149,6 +149,58 @@ POST /api/dfy-memory/window/roll    7 天窗口滚动
 
 ---
 
+## 自注入（默认关）
+
+插件可以**自己**把记忆块挂进 system prompt 末尾，不用宿主帮忙。默认**关闭**——不想要就什么都不用写。
+
+```yaml
+# cordis.patch.yml
+- id: dfy-memory
+  name: dsh-dfy-memory
+  config:
+    selfInject:
+      enabled: true                      # 打开
+      order: 10150                       # 插在 first-party 段之后
+      refreshMs: 60000                   # 兜底刷新间隔
+      presets: ['qq-chat', 'qq-chat-v2'] # 只给这些会话注入；空 = 全部会话
+      cwdContains: []                    # 或者按会话工作目录匹配；空 = 不按目录
+```
+
+打开之后：
+
+- 记忆块进的是 **system prompt**，不是对话历史 —— 所以**压缩（compaction）压不掉它**
+- 刷新节奏跟 QQ 桥接一致：**来一条新消息算一次**，同一轮里不管跑 5 步还是 30 步都用同一份
+  （另有 `refreshMs` 兜底，长时间挂机时慢慢追上淡忘变化）
+- `presets` / `cwdContains` 决定只对哪些会话生效；**两个都留空 = 所有会话**（桌面端也会注入）
+
+---
+
+## 关着的时候：怎么接别的桥接
+
+默认就是关的。宿主每轮自己取这段文本、拼进自己的提示词即可，两种方式：
+
+**A. 同进程直接调门面**
+
+```js
+const f = createMemoryFacade(resolvePaths(你的配置), { cfgProvider: () => 你的配置 })
+const block = f.memory.forPrompt()      // 【你记得的事】这段
+```
+
+**B. 跨进程走 HTTP**
+
+```
+GET http://127.0.0.1:<DSH端口>/api/dfy-memory/prompt-block
+→ { "ok": true, "text": "【你记得的事】…", "chars": 123 }
+```
+
+取的时候注意三条：
+
+1. **每轮取一次就够**（跟桥接现有的"每次唤醒拼一次"一样），别每步取
+2. 取不到（超时/DSH 没起）就**降级成空串**，不要阻断回消息
+3. **不要自己再实现一份淡忘/注入逻辑**——那会让"模糊的条目"和"core 正文"两边说法不一致
+
+---
+
 ## 配置
 
 `cordis.patch.yml` 里能改的：
@@ -190,7 +242,7 @@ POST /api/dfy-memory/window/roll    7 天窗口滚动
 ## 自检
 
 ```powershell
-node selfcheck.mjs     # 328 项，全用临时目录，不碰真实数据
+node selfcheck.mjs     # 347 项，全用临时目录，不碰真实数据
 ```
 
 覆盖：路径解析、记忆（写入/判重/召回/分层/touch/恢复原文/渲染/注入文本/生命周期）、
@@ -356,9 +408,22 @@ node selfcheck.mjs     # 328 项，全用临时目录，不碰真实数据
 - 文档按最新版本重写：工具 29 → 40、自检 42 → 328 项、数据目录改为 `~/.dsh/dsh-dfy-memory/`
 - `cordis.patch.yml` 头部注释与 `package.json` 描述同步（不再写"骨架版/不注册工具/38 个"）
 
+### 0.9.0（2026-11-26）
+
+- **新增自注入（默认关）**：`config.selfInject.enabled` 打开后，插件自己把记忆块挂进
+  **system prompt 末尾**（`order: 10150`），宿主什么都不用做。
+  - 刷新节奏对齐 QQ 桥接：**来一条新消息算一次**，同一轮里跑多少步都用同一份快照
+    （`agent/inbox/spliced` 标脏 + `refreshMs` 兜底）
+  - `presets` / `cwdContains` 精确限定只对哪些会话生效，两个都留空 = 所有会话
+  - 进 system prompt 的好处：**压缩（compaction）压不掉它**
+- 关着的时候宿主怎么接：README 新增一节，给出「门面直调」和「HTTP `prompt-block`」两种方式，
+  并写明三条注意（每轮取一次 / 取不到降级成空串 / 别自己再实现一份淡忘逻辑）
+- `lib/inject-self.js` 抽出刷新策略，可脱离 DSH 单测（会话匹配、快照、标脏重算）
+- 自检 328 → **347** 条
+
 ## 版本
 
-**0.8.1**（从这版起设置页默认打开）。仓库每个版本一条分支（`0.7.0`、`0.8.0`、`0.8.1`…）加一个同名 tag（`v0.8.1`），
+**0.9.0**（自注入开关，默认关；设置页默认打开）。仓库每个版本一条分支（`0.7.0`、`0.8.0`、`0.8.1`…）加一个同名 tag（`v0.8.1`），
 `git diff v0.8.0 v0.8.1` 就是两版之间的全部差异。发布流程见 `CONTRIBUTING.md`。
 
 ## License

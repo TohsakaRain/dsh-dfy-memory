@@ -24,3 +24,12 @@
         # stateDir:  'D:/my/dsh-data/state'
         # worksDir:  'D:/my/dsh-data/works'
         enabled: true
+
+        # 自注入（默认关）：开了之后插件自己把记忆块挂进 system prompt 末尾。
+        # 不填这一段 = 关闭，注入归宿主（宿主自己取 GET /api/dfy-memory/prompt-block）。
+        # selfInject:
+        #   enabled: true
+        #   order: 10150                 # 排在 first-party 段之后
+        #   refreshMs: 60000             # 兜底刷新间隔（平时按「来新消息」刷新）
+        #   presets: ['qq-chat', 'qq-chat-v2']   # 只给这些会话注入；空 = 全部会话
+        #   cwdContains: ['qq-bridge']   # 或者按会话工作目录匹配；空 = 不按目录筛
