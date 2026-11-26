@@ -1,6 +1,6 @@
 # dsh-dfy-memory
 
-> 给 AI 伴侣一套**会淡忘**的人格数据层：长期记忆 / 心情·好感 / 承诺 / 日记。
+> 给大肥鱼一套**会淡忘**的人格数据层：长期记忆 / 心情·好感 / 承诺 / 日记。
 > 一个 DeepSeek Harness（DSH）插件，29 个工具 + 一个设置页。
 
 不是向量库，也不是"把聊天记录全存下来"。它模仿的是**人的记性**：
@@ -417,5 +417,4 @@ client-modules: <包名> declares dsh.client but exports no "./client" bundle
 ## License
 
 MIT
-
 
