@@ -34,6 +34,7 @@ import {
 } from './lib/memory-store.js';
 import { mailboxDir, sendLetter, listLetters, readLetter, mailStats } from './lib/mailbox.js';
 import { DEFAULT_SELF_INJECT, SETTINGS_REL, resolveSelfInject, wireSelfInject } from './lib/inject-self.js';
+import { composeSelfInject } from './lib/inject-parts.js';
 // 对外仍然从 index 导出（自检和历史调用都从这里拿）
 export { wireSelfInject };
 import { searchArchive, getArchive, statsArchive, archiveHint } from './lib/archive.js';
@@ -52,7 +53,7 @@ import {
 } from './lib/diary.js';
 import { worksDirOf, ensureDir as worksEnsure, saveTextWork, saveImageWork, listWorks, readWork, statsWorks, worksHint, CATEGORIES as WORK_CATEGORIES, archiveWork, listVersions, restoreWork, saveDraft, listDrafts, readDraft, finalizeDraft, listProjects, createProject, renameProject, moveWork, cleanDrafts, overviewWorks, checkWorks, repairWorks, sanitizeProject } from './lib/works.js';
 import { createToolRegistrar } from './lib/toolkit.mjs';
-import { handleApi, looksLikeBridgeConfig } from './lib/webapi.mjs';
+import { handleApi, looksLikeBridgeConfig, readBridgeConfig } from './lib/webapi.mjs';
 import {
   TUNING_SPEC, TUNING_DEFAULTS, readTuning, writeTuning, toCfg,
 } from './lib/tuning.js';
@@ -1563,7 +1564,18 @@ export function apply(ctx, config = {}) {
   const selfInjectFile = path.join(paths.dataRoot, SETTINGS_REL);
   const selfInjectWire = (() => {
     try {
-      return wireSelfInject(ctx, { file: selfInjectFile, config: config?.selfInject ?? {} }, facade, log);
+      const bridgeCfg = (() => { try { return readBridgeConfig(bridgeConfig) || {}; } catch { return {}; } })();
+      const ownerQQ = String(bridgeCfg.ownerQQ || '').trim();
+      const holidaysFile = path.join(paths.stateDir, 'holidays.json');
+      const build = (now, settings) => composeSelfInject({
+        parts: settings?.parts,
+        now,
+        facade,
+        who: ownerQQ,
+        holidaysFile,
+        log,
+      });
+      return wireSelfInject(ctx, { file: selfInjectFile, config: config?.selfInject ?? {}, build }, facade, log);
     } catch (error) {
       log('[dfy-memory] 自注入接线失败（不影响工具与数据）：' + (error?.message ?? error));
       return { ok: false, why: String(error?.message ?? error) };

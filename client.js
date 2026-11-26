@@ -130,6 +130,14 @@ if (typeof window === 'undefined' || !window.__ModuleLoader__?.load) {
       ['about', '介绍'],
     ];
 
+    const SELF_INJECT_PARTS = [
+      ['diary', '今天日记'],
+      ['memory', '长期记忆'],
+      ['mood', '心情 + 好感度'],
+      ['promises', '答应过的事'],
+      ['time', '时间感'],
+    ];
+
     const SOURCE_LABEL = {
       env: '环境变量 DFY_DATA_DIR（压过所有设置）',
       config: '插件配置',
@@ -544,6 +552,7 @@ if (typeof window === 'undefined' || !window.__ModuleLoader__?.load) {
             refreshMs: s.refreshMs ?? 60000,
             presets: (s.presets || []).join(', '),
             cwdContains: (s.cwdContains || []).join(', '),
+            parts: Array.isArray(s.parts) ? [...s.parts] : [],
           });
         } catch (e) { setErr(String(e?.message ?? e)); }
       }, []);
@@ -561,6 +570,8 @@ if (typeof window === 'undefined' || !window.__ModuleLoader__?.load) {
         if (Number(injDraft.refreshMs) !== Number(cur.refreshMs)) out.refreshMs = Number(injDraft.refreshMs);
         if (list(injDraft.presets).join('|') !== (cur.presets || []).join('|')) out.presets = list(injDraft.presets);
         if (list(injDraft.cwdContains).join('|') !== (cur.cwdContains || []).join('|')) out.cwdContains = list(injDraft.cwdContains);
+        const partsOf = (v) => (Array.isArray(v) ? v : []).join('|');
+        if (partsOf(injDraft.parts) !== partsOf(cur.parts)) out.parts = Array.isArray(injDraft.parts) ? [...injDraft.parts] : [];
         return out;
       };
 
@@ -580,6 +591,7 @@ if (typeof window === 'undefined' || !window.__ModuleLoader__?.load) {
             refreshMs: s.refreshMs ?? 60000,
             presets: (s.presets || []).join(', '),
             cwdContains: (s.cwdContains || []).join(', '),
+            parts: Array.isArray(s.parts) ? [...s.parts] : [],
           });
           flash(s.enabled ? '自注入已打开（下一轮就生效）' : '自注入已关闭（下一轮就交回桥接）');
         } catch (e) {
@@ -647,6 +659,24 @@ if (typeof window === 'undefined' || !window.__ModuleLoader__?.load) {
                 onChange: (ev) => setInjDraft((d) => ({ ...d, refreshMs: ev.target.value === '' ? '' : Number(ev.target.value) })),
               }),
               '平时按「来新消息」刷新；这个只是在长时间没人说话时兜底（默认 60000 = 1 分钟）。'),
+            injRow('注入哪些内容（parts）',
+              h('div', { style: { display: 'flex', gap: 14, flexWrap: 'wrap' } },
+                SELF_INJECT_PARTS.map(([k, label]) => h('label', {
+                  key: k,
+                  style: { display: 'flex', alignItems: 'center', gap: 5, fontSize: 12, cursor: 'pointer' },
+                },
+                  h('input', {
+                    type: 'checkbox',
+                    checked: (injDraft && Array.isArray(injDraft.parts) ? injDraft.parts : []).includes(k),
+                    disabled: injBusy,
+                    onChange: (ev) => setInjDraft((d) => {
+                      const cur = new Set(d && Array.isArray(d.parts) ? d.parts : []);
+                      if (ev.target.checked) cur.add(k); else cur.delete(k);
+                      return { ...d, parts: [...cur] };
+                    }),
+                  }),
+                  label))),
+              '只影响自注入。关掉的块不出现在 system prompt 里（日期、记忆、心情、承诺、时间感各自独立）。'),
             injRow('只对这些 preset 生效（presets）',
               h('input', {
                 style: S.input, spellCheck: false, placeholder: 'qq-chat, qq-chat-v2（留空 = 所有会话）',
