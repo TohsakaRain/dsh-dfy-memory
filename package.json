@@ -1,6 +1,6 @@
 {
   "name": "dsh-dfy-memory",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "DSH 插件：给 AI 伴侣一套会淡忘的人格数据层（心情/好感度、长期记忆、承诺、日记、对话窗口·跨天全文搜、作品库·草稿/定稿/归档、邮箱），带 38 个工具和一个设置页",
   "type": "module",
   "main": "index.js",

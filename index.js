@@ -25,16 +25,19 @@
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import {
   loadStore, saveStore, addMemory, recallMemories, touchMemory, updateMemory,
   forgetMemory, statsMemories, recallForPrompt, renderMarkdown, TIERS, DEFAULT_TUNING,
-  maintainMemories, lifecycleOf, blurText, pendingDigestDays,
+  maintainMemories, lifecycleOf, blurText, pendingDigestDays, tuningFromCfg, isVague,
+  touchMany, exportMarkdown,
 } from './lib/memory-store.js';
 import { mailboxDir, sendLetter, listLetters, readLetter, mailStats } from './lib/mailbox.js';
 import { searchArchive, getArchive, statsArchive, archiveHint } from './lib/archive.js';
 import { listWindow, readWindowFile, rollWindow, summarizeDay, windowHint, contextDir, debugInfo as windowDebugInfo } from './lib/window.js';
 import { extractEvents } from './lib/chatlog.js';
 import { exportDaily, archiveLogStats } from './lib/daily-archive.js';
+import { resolveDayFile, listDayFiles } from './lib/day-paths.js';
 import { loadEmotion, saveEmotion, setMood, clearMood, currentMood, setAffinity, getAffinity, listAffinity, formatEmotionLines, moodTrend, changesToday, recentGround } from './lib/emotion.js';
 import {
   loadCommitments, saveCommitments, addCommitment, listCommitments,
@@ -44,9 +47,12 @@ import {
   appendEntry as diaryAppend, readDay as diaryRead, listDays as diaryList,
   statusSnapshot as diaryStatus, todayStr as diaryToday,
 } from './lib/diary.js';
-import { worksDirOf, ensureDir as worksEnsure, saveTextWork, saveImageWork, listWorks, readWork, statsWorks, worksHint, CATEGORIES as WORK_CATEGORIES, archiveWork, listVersions, restoreWork, saveDraft, listDrafts, readDraft, finalizeDraft } from './lib/works.js';
+import { worksDirOf, ensureDir as worksEnsure, saveTextWork, saveImageWork, listWorks, readWork, statsWorks, worksHint, CATEGORIES as WORK_CATEGORIES, archiveWork, listVersions, restoreWork, saveDraft, listDrafts, readDraft, finalizeDraft, listProjects, createProject, renameProject, moveWork, cleanDrafts, overviewWorks, checkWorks, repairWorks, sanitizeProject } from './lib/works.js';
 import { createToolRegistrar } from './lib/toolkit.mjs';
-import { handleApi } from './lib/webapi.mjs';
+import { handleApi, looksLikeBridgeConfig } from './lib/webapi.mjs';
+import {
+  TUNING_SPEC, TUNING_DEFAULTS, readTuning, writeTuning, toCfg,
+} from './lib/tuning.js';
 
 export const name = 'dfy-memory';
 
@@ -56,32 +62,58 @@ export const inject = ['tools', 'webServer'];
 // 数据默认放在用户目录下（和 douyin-browser 等第三方插件一致）：
 //   ~/.dsh/dsh-dfy-memory/
 //   ├── memory/   长期记忆 memory.json + memory.md
-//   ├── diary/    日记
+//   ├── diary/    日记（按月分目录）
 //   ├── state/    心情·好感度 emotion.json + emotion.md、承诺
 //   ├── works/    作品库（text / image，各自带 archive、drafts）
 //   ├── mailbox/  邮箱（电报式信件，和作品库分开）
-//   └── context/  按天的对话窗口
-// 想换地方：环境变量 DFY_DATA_DIR，或插件 config 里的 memoryDir / diaryDir / stateDir。
-const DATA_ROOT = path.resolve(process.env.DFY_DATA_DIR || path.join(os.homedir(), '.dsh', 'dsh-dfy-memory'));
-const DEFAULTS = Object.freeze({
-  diaryDir: path.join(DATA_ROOT, 'diary'),
-  memoryDir: path.join(DATA_ROOT, 'memory'),
-  stateDir: path.join(DATA_ROOT, 'state'),
-});
+//   ├── context/  按天的对话窗口
+//   └── archive/  归档（聊天记录 / 记忆归档）
+//
+// ⭐ 2026-11-22 起路径收敛成**一个** dataRoot：其余目录全部由它派生。
+//   优先级：环境变量 DFY_DATA_DIR > 插件 config.dataRoot > 默认（用户目录下）。
+//   ⚠️ 单独写 memoryDir / diaryDir 等旧字段仍然有效（兼容老配置）；
+//   但 dataRoot 一变，没被单独指定的目录都跟着走。
+export const DEFAULT_DATA_ROOT = path.join(os.homedir(), '.dsh', 'dsh-dfy-memory');
 
-/** 配置解析：插件 config > 环境变量 > 默认值。 */
+/** 配置解析：环境变量 > 插件 config > 默认值。 */
 export function resolvePaths(config = {}) {
-  const dir = (v, fallback) => (typeof v === 'string' && v.trim() ? path.resolve(v) : fallback);
-  const memoryDir = dir(process.env.DFY_MEMORY_DIR || config.memoryDir, DEFAULTS.memoryDir);
+  const dir = (v) => (typeof v === 'string' && v.trim() ? path.resolve(v) : '');
+  const rootCfg = dir(process.env.DFY_DATA_DIR) || dir(config.dataRoot) || DEFAULT_DATA_ROOT;
+  // memory 老配置里可能单独指过；它一旦被指，根目录就以它的父目录为准
+  const memoryDir = dir(process.env.DFY_MEMORY_DIR || config.memoryDir) || path.join(rootCfg, 'memory');
+  const dataRoot = path.dirname(path.resolve(memoryDir));
   return {
-    diaryDir: dir(process.env.DFY_DIARY_DIR || config.diaryDir, DEFAULTS.diaryDir),
+    dataRoot,
     memoryDir,
-    stateDir: dir(process.env.DFY_STATE_DIR || config.stateDir, DEFAULTS.stateDir),
+    diaryDir: dir(process.env.DFY_DIARY_DIR || config.diaryDir) || path.join(dataRoot, 'diary'),
+    stateDir: dir(process.env.DFY_STATE_DIR || config.stateDir) || path.join(dataRoot, 'state'),
     // 作品库默认跟 memory 同级（<dataRoot>/works）；也可用 config.worksDir 单独指到别处
-    worksDir: dir(process.env.DFY_WORKS_DIR || config.worksDir, worksDirOf(memoryDir)),
+    worksDir: dir(process.env.DFY_WORKS_DIR || config.worksDir) || path.join(dataRoot, 'works'),
     // 邮箱：她和执行者之间的信。<dataRoot>/mailbox，和作品库分开
-    mailDir: dir(process.env.DFY_MAIL_DIR || config.mailDir, path.join(path.dirname(path.resolve(memoryDir)), 'mailbox')),
-    dataRoot: path.dirname(path.resolve(memoryDir)),
+    mailDir: dir(process.env.DFY_MAIL_DIR || config.mailDir) || path.join(dataRoot, 'mailbox'),
+  };
+}
+
+/** 「这个路径是从哪来的」—— 设置页要如实告诉使用者，不能猜。 */
+export function describePaths(config = {}) {
+  const paths = resolvePaths(config);
+  const env = String(process.env.DFY_DATA_DIR || '').trim();
+  const cfg = String(config?.dataRoot || '').trim();
+  return {
+    dataRoot: paths.dataRoot,
+    defaultDataRoot: DEFAULT_DATA_ROOT,
+    envDataRoot: env || null,
+    configDataRoot: cfg || null,
+    source: env ? 'env' : cfg ? 'config' : 'default',
+    derived: {
+      memory: paths.memoryDir,
+      diary: paths.diaryDir,
+      state: paths.stateDir,
+      works: paths.worksDir,
+      mailbox: paths.mailDir,
+      context: path.join(paths.dataRoot, 'context'),
+      archive: path.join(paths.dataRoot, 'archive'),
+    },
   };
 }
 
@@ -90,39 +122,38 @@ export function resolvePaths(config = {}) {
  * 设计原则：**薄透传** —— 返回形状与 lib/ 里的原始函数完全一致，
  * 这样第 ④ 步桥接切过来是 1:1 替换，不会多出一层"形状转换"。
  */
-export function createMemoryFacade(paths) {
+export function createMemoryFacade(paths, opts = {}) {
   const ctxDir = contextDir(paths.memoryDir);
   const dataRoot = path.dirname(path.resolve(paths.memoryDir));
   const emotionFile = path.join(paths.stateDir, 'emotion.json');
   const commitmentsFile = path.join(paths.stateDir, 'commitments.json');
-  const tuningCfg = {
-    memory: {
-      dir: paths.memoryDir,
-      injectLimit: 8,
-      injectMaxChars: 600,
-      halfLifeImportantDays: 21,
-      halfLifeNormalDays: 7,
-      fadeThreshold: 0.02,
-    },
-    lifecycle: { enabled: true },
-  };
+  // ⭐ 2026-11-22：调参不再写死。每次用的时候现读桥接的 config.json
+  // （lib/tuning.js 带 mtime 缓存），改完立刻生效，且和桥接手里那份是同一个。
+  const cfgProvider = typeof opts.cfgProvider === 'function'
+    ? opts.cfgProvider
+    : () => toCfg(TUNING_DEFAULTS, paths.memoryDir);
 
   return {
     paths,
     memory: {
       add: (input) => addMemory(paths.memoryDir, input),
-      recall: (opts) => recallMemories(paths.memoryDir, opts),
-      touch: (id) => touchMemory(paths.memoryDir, id),
+      recall: (opts) => recallMemories(paths.memoryDir, opts, tuningFromCfg(cfgProvider())),
+      touch: (id) => touchMemory(paths.memoryDir, id, tuningFromCfg(cfgProvider())),
+      /** 一次"想起来"一批（查到了记忆时用）。返回真的恢复了原文的那些。 */
+      touchMany: (ids) => touchMany(paths.memoryDir, ids, tuningFromCfg(cfgProvider())),
       update: (id, patch) => updateMemory(paths.memoryDir, id, patch),
       forget: (id) => forgetMemory(paths.memoryDir, id),
       stats: () => statsMemories(paths.memoryDir),
-      forPrompt: (now = Date.now()) => recallForPrompt(tuningCfg, now),
-      render: () => renderMarkdown(loadStore(paths.memoryDir)),
-      // 生命周期：把到期的模糊化 / 归档（"删除"= 归档，只追加不删）
-      maintain: (now = Date.now()) => maintainMemories(paths.memoryDir, DEFAULT_TUNING, now),
+      forPrompt: (now = Date.now()) => recallForPrompt(cfgProvider(), now),
+      render: () => renderMarkdown(loadStore(paths.memoryDir), tuningFromCfg(cfgProvider())),
+      /** 只重写 memory.md（改调参后同步节奏文案用）；不动 memory.json。 */
+      syncExport: () => exportMarkdown(paths.memoryDir, tuningFromCfg(cfgProvider())),
+      // 生命周期：把到期的模糊化 / 归档（"删除"= 归档，只追加不删）。
+      // 参数跟注入同一份（桥接 config.json），不是写死的 DEFAULT_TUNING。
+      maintain: (now = Date.now()) => maintainMemories(paths.memoryDir, tuningFromCfg(cfgProvider()), now),
       lifecycle: (id) => {
         const e = loadStore(paths.memoryDir).entries.find((x) => x.id === id);
-        return e ? lifecycleOf(e) : null;
+        return e ? lifecycleOf(e, tuningFromCfg(cfgProvider())) : null;
       },
       blur: blurText,
       tiers: TIERS,
@@ -184,6 +215,17 @@ export function createMemoryFacade(paths) {
       read: (opts) => readWork(paths.worksDir, opts),
       stats: () => statsWorks(paths.worksDir),
       hint: () => worksHint(paths.worksDir),
+      // 2026-11-21 项目化
+      projects: (opts) => listProjects(paths.worksDir, opts),
+      createProject: (input) => createProject(paths.worksDir, input),
+      renameProject: (input) => renameProject(paths.worksDir, input),
+      move: (input) => moveWork(paths.worksDir, input),
+      // 2026-11-22 她提的四件事
+      cleanDrafts: (input) => cleanDrafts(paths.worksDir, input),
+      overview: (opts) => overviewWorks(paths.worksDir, opts),
+      check: () => checkWorks(paths.worksDir),
+      repair: () => repairWorks(paths.worksDir),
+      sanitizeProject,
     },
     archive: {
       search: (opts) => searchArchive(paths.memoryDir, opts),
@@ -356,9 +398,10 @@ export function registerTools(ctx, facade, log = () => {}) {
   // ── 长期记忆（6）─────────────────────────────────────────────
   tool({
     name: 'dfy_memory_save',
-    description: '把一件值得长期记住的事存进记忆。**只有你自己判断重要的才存**：名字、身份、约定、承诺、让你改变看法的事、他反复提起的事。日常琐事不用存——那些会像人一样慢慢淡掉。存的时候写具体，别写「今天很开心」这种。',
+    description: '把一件值得长期记住的事存进记忆。**只有你自己判断重要的才存**：名字、身份、约定、承诺、让你改变看法的事、他反复提起的事。日常琐事不用存——那些会像人一样慢慢淡掉。存的时候写具体，别写「今天很开心」这种。'
+      + '**当天发生的事，正文里不要再写日期** —— 外面会自动标出写下那天；只有**补记**（事后补录以前的事）才在正文开头写日期，因为那时候两个日期不一样。',
     parameters: {
-      text: { type: 'string', description: '要记住的那件事，一句话写清（谁、什么事、什么时候）' },
+      text: { type: 'string', description: '要记住的那件事，一句话写清（谁、什么事、什么时候）。**当天的事不要自己再写日期**（外面会标）；补记以前的事才在开头写「YYYY-MM-DD 」' },
       tier: { type: 'string', description: '重要性，分三层：\ncore = 名字/身份/承诺/约定/大事（永不淡忘）\nimportant = 有情绪、有后续的事；让他改变看法的事、他反复提的事\nnormal = 日常琐事（吃饭/天气/临时安排）—— **不确定就选这个**\n\n注意：标得越高越占注入位。日常琐事标 important，会把真正重要的事挤掉。' },
       who: { type: 'string', description: '和谁有关（QQ 号或昵称）' },
       tags: { type: 'string', description: '标签，逗号分隔，如「约定,游戏」' },
@@ -378,7 +421,10 @@ export function registerTools(ctx, facade, log = () => {}) {
 
   tool({
     name: 'dfy_memory_recall',
-    description: '想起以前的事。想不起某人说过什么、上次约定了什么、他讨厌什么时用。不填 query 就按「最近+最重要」给你几条；填了 query 就按关键词找——命中任意一个词就算（OR），命中越多排越前，每条还会带一句命中的原文。一个都没命中时会退化成按重要度给你三条，并标注「没有真正命中」。',
+    description: '想起以前的事。想不起某人说过什么、上次约定了什么、他讨厌什么时用。'
+      + '不填 query 就按「最近+最重要」给你几条；填了 query 就按关键词找——命中任意一个词就算（OR），'
+      + '命中越多排越前，每条还会带一句命中的原文。一个都没命中时会退化成按重要度给你三条，并标注「没有真正命中」。'
+      + '⚠️ 查到就算想起来了：返回的每一条都会被记一次「想起来」，之前模糊掉的会当场恢复成原文。',
     parameters: {
       query: { type: 'string', description: '关键词，多个用空格分隔（OR 匹配：命中任意一个就出来，命中越多排越前）' },
       tier: { type: 'string', description: '只看某一层：core / important / normal' },
@@ -387,27 +433,46 @@ export function registerTools(ctx, facade, log = () => {}) {
     async execute(args) {
       const items = f.memory.recall({ query: args.query, tier: args.tier, limit: args.limit });
       if (!items?.length) return args.query ? `没想起来跟「${args.query}」有关的事。` : '记忆里还没有东西。';
+
+      // 查到了 = 想起来了。退化的结果（一个都没命中，随便给几条）不算。
+      const degraded = Boolean(items[0]?.degraded);
+      let restoredIds = new Set();
+      if (!degraded) {
+        try {
+          const changed = f.memory.touchMany(items.map((e) => e.id)) || [];
+          restoredIds = new Set(changed.map((c) => c.id));
+        } catch { /* 记不上不影响这次查询结果 */ }
+      }
+
       const lines = items.map((e) => {
-        const head = `- ${e.id} ［${e.tier}］${e.text}`;
+        const vague = isVague(e) ? '　［这条已经模糊了，只剩个大概］' : '';
+        const head = `- ${e.id} ［${e.tier}］${e.text}${vague}`;
         const hook = e.hook ? `\n    钩子：${e.hook}` : '';
         const quote = e.quote ? `\n    原话：${e.quote}` : '';
         const refs = Array.isArray(e.refs) && e.refs.length ? `\n    出处：${e.refs.join('、')}` : '';
         const snip = e.snippet ? `\n    命中：${e.snippet}` : '';
-        return `${head}${hook}${quote}${refs}${snip}（分数 ${Number(e.score).toFixed(2)}）`;
+        const back = restoredIds.has(e.id) ? '\n    （这条之前模糊了，这次查到了，原文已经回来了）' : '';
+        return `${head}${hook}${quote}${refs}${snip}（分数 ${Number(e.score).toFixed(2)}）${back}`;
       });
-      if (items[0]?.degraded) lines.unshift('（没有真正命中，以下是按重要度/时间给的几条）');
+      if (degraded) lines.unshift('（没有真正命中，以下是按重要度/时间给的几条）');
       return lines.join('\n');
     },
   });
 
   tool({
     name: 'dfy_memory_touch',
-    description: '这条记忆被想起来了/被提起了：强化它一次，让它不容易淡忘。当你在对话里主动想起并说出一条记忆时，顺手调它。',
+    description: '这条记忆被想起来了/被提起了：强化它一次，让它不容易淡忘。'
+      + '如果这条已经被模糊过（只剩个大概），调它会把原文重新变清晰——想起来越多越清楚。'
+      + '当你在对话里主动想起并说出一条记忆时，顺手调它。',
     parameters: { id: { type: 'string', description: '记忆 ID（dfy_memory_recall 返回里括号前的那个）' } },
     async execute(args) {
       const r = f.memory.touch(args.id);
       if (!r) return `没找到这条记忆（${args.id}）。`;
-      return `已经强化过了：强度 ${Number(r.strength ?? 0).toFixed(2)}`;
+      const base = `已经强化过了：强度 ${Number(r.strength ?? 0).toFixed(2)}`;
+      if (r.restored) {
+        return `${base}\n（这条之前模糊到只剩 ${String(r.restored.from).length} 字，现在恢复成完整 ${String(r.restored.to).length} 字的原文了）`;
+      }
+      return base;
     },
   });
 
@@ -569,7 +634,7 @@ export function registerTools(ctx, facade, log = () => {}) {
       const cur = f.window.get(day);
       if (!cur) {
         // 老日子（窗口已滚动删除）也允许补写：只要归档里还留着那天的原始聊天记录
-        const rawPath = path.join(f.paths.dataRoot, 'archive', 'chat-logs', `${day}.md`);
+        const rawPath = resolveDayFile(path.join(f.paths.dataRoot, 'archive', 'chat-logs'), day, '.md');
         if (!fs.existsSync(rawPath)) return `窗口里没有 ${day}，归档里也没有那天的原始记录——没东西可压。`;
       }
       const r = f.window.summarize(day, text);
@@ -663,11 +728,11 @@ export function registerTools(ctx, facade, log = () => {}) {
     async execute(args = {}) {
       const day = String(args.day ?? '').trim();
       if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return "日期格式要是 YYYY-MM-DD。";
-      const file = path.join(f.paths.dataRoot, "archive", "chat-logs", day + ".md");
+      const file = resolveDayFile(path.join(f.paths.dataRoot, "archive", "chat-logs"), day, ".md");
       if (!fs.existsSync(file)) {
         const dir = path.join(f.paths.dataRoot, "archive", "chat-logs");
         let have = [];
-        try { have = fs.readdirSync(dir).filter((n) => /^\d{4}-\d{2}-\d{2}\.md$/.test(n)).map((n) => n.slice(0, 10)); } catch { have = []; }
+        try { have = listDayFiles(dir, '.md').map((x) => x.day); } catch { have = []; }
         return "没有 " + day + " 的原始记录。现在有：" + (have.join("、") || "（空）");
       }
       const all = fs.readFileSync(file, "utf8");
@@ -703,7 +768,7 @@ export function registerTools(ctx, facade, log = () => {}) {
 
       let allDays = [];
       try {
-        allDays = fs.readdirSync(rawDir).filter((n) => /^\d{4}-\d{2}-\d{2}\.md$/.test(n)).map((n) => n.slice(0, 10)).sort().reverse();
+        allDays = listDayFiles(rawDir, '.md').map((x) => x.day).sort().reverse();
       } catch { return '还没有任何原始记录。'; }
       const lastN = Number(args.days) > 0 ? Math.floor(Number(args.days)) : 0;
       const days = lastN ? allDays.slice(0, lastN) : allDays;
@@ -716,7 +781,7 @@ export function registerTools(ctx, facade, log = () => {}) {
       const hits = [];
       for (const day of days) {
         let text = '';
-        try { text = fs.readFileSync(path.join(rawDir, day + '.md'), 'utf8'); } catch { continue; }
+        try { text = fs.readFileSync(resolveDayFile(rawDir, day, '.md'), 'utf8'); } catch { continue; }
         const lower = text.toLowerCase();
         const found = [];
         for (const term of terms) {
@@ -795,12 +860,12 @@ export function registerTools(ctx, facade, log = () => {}) {
         const totalW = chars.reduce((a, c) => a + weightOf(c), 0);
         if (chars.length && totalW > 0) {
           let summaries = [];
-          try { summaries = fs.readdirSync(ctxDir).filter((n) => /^\d{4}-\d{2}-\d{2}\.s\.md$/.test(n)).map((n) => n.slice(0, 10)).sort().reverse(); } catch { summaries = []; }
+          try { summaries = listDayFiles(ctxDir, '.s.md').map((x) => x.day).sort().reverse(); } catch { summaries = []; }
           const hits2 = [];
           for (const day of summaries) {
             if (lastN && !days.includes(day)) continue;
             let text = '';
-            try { text = fs.readFileSync(path.join(ctxDir, day + '.s.md'), 'utf8'); } catch { continue; }
+            try { text = fs.readFileSync(resolveDayFile(ctxDir, day, '.s.md'), 'utf8'); } catch { continue; }
             const body = text.replace(/^<!--[\s\S]*?-->\n?/, '');
             const hitChars = chars.filter((c) => body.includes(c));
             const fullCover = hitChars.reduce((a, c) => a + weightOf(c), 0) / totalW;
@@ -1022,21 +1087,117 @@ export function registerTools(ctx, facade, log = () => {}) {
     },
   });
 
-  // ── 作品库（4）──────────────────────────────────────────────
-  // 存"她认为是自己产出的东西"：一段文字、一张画。目录里按类别分文件夹，文件名就是标题。
+  // ── 作品库（2026-11-21 起按项目组织）────────────────────────
+  // 项目必须先注册；项目里的子分类（path）她自己定，不注册。
+  // 为什么强制：187 件全平铺在 text/ 下，她自己都说"堆在一个抽屉里"。
+  const projectHint = (category) => {
+    let list = [];
+    try { list = f.works.projects(category ? { category } : {}); } catch { list = []; }
+    const known = list.filter((p) => !p.unregistered);
+    if (!known.length) {
+      return '\n还没有任何项目。先建一个：dfy_work_project(action="create", name="项目名", category="text")';
+    }
+    const lines = known.map((p) => `  · ${p.name}（${p.category}${p.subdirs.length ? '，子目录：' + p.subdirs.join('/') : ''}${p.works ? `，${p.works} 件` : ''}）`);
+    return `\n现有项目：\n${lines.join('\n')}\n要新建：dfy_work_project(action="create", name="…", category="text")`;
+  };
+
+  /** 解析并校验项目：必填 + 必须已注册。返回 { name } 或 { error }。 */
+  const pickProject = (args, category) => {
+    const raw = String(args?.project ?? '').trim();
+    if (!raw) {
+      return { error: '没有指定项目（project），我不猜。' + projectHint(category)
+        + '\n示范：dfy_work_save(title="…", text="…", project="项目名", path="子分类")' };
+    }
+    let name;
+    try { name = f.works.sanitizeProject(raw); } catch (e) { return { error: String(e?.message ?? e) }; }
+    let exists = false;
+    try { exists = f.works.projects(category ? { category } : {}).some((p) => p.name === name); } catch { exists = false; }
+    if (!exists) return { error: `项目「${name}」还没注册，先建它。` + projectHint(category) };
+    return { name };
+  };
+
+  /** 作品库总览的排版（dfy_works kind="overview"）。 */
+  const formatOverview = (o) => {
+    const t = o.totals;
+    const lines = [
+      `作品库：${o.dir}`,
+      `当前稿 ${t.work} · 草稿 ${t.draft} · 归档 ${t.archive}${t.oldDraft ? `（其中旧草稿 ${t.oldDraft}）` : ''}`
+        + `（索引 ${t.records} 条 / 磁盘上 ${t.live} 条）· 文字 ${t.text} · 图片 ${t.image}`,
+      '',
+      '项目：',
+    ];
+    if (!o.projects.length) lines.push('  （还没有项目）');
+    for (const p of o.projects) {
+      const flag = p.registered ? '' : ' ⚠️未注册';
+      const subs = p.subdirs.length
+        ? p.subdirs.map((s) => `${s.name || '项目根'} ${s.work}`).join(' · ')
+        : '还没有子分类';
+      lines.push(`  · ${p.name}（${p.category}）${flag} 当前稿 ${p.work} · 草稿 ${p.draft} · 归档 ${p.archive}${p.oldDraft ? `（旧草稿 ${p.oldDraft}）` : ''}`);
+      lines.push(`      ${subs}`);
+    }
+    if (o.loose) lines.push(`  · 还没归项目的散件：${o.loose} 件（dfy_works(kind="root") 看）`);
+    lines.push('', '最近动过：');
+    if (!o.recent.length) lines.push('  （空的）');
+    for (const r of o.recent) {
+      const kindLabel = r.kind === 'draft' ? '草稿' : r.kind === 'archive' ? (r.oldDraft ? '旧草稿' : '历史版本') : '当前稿';
+      const where = [r.project || '未归项目', r.sub].filter(Boolean).join('/');
+      lines.push(`  ${String(r.at).replace('T', ' ').slice(0, 16)}  ${kindLabel}  〔${where}〕「${r.title}」`);
+    }
+    const i = o.issues;
+    lines.push('');
+    if (i.missing || i.duplicated || i.mismarked || i.orphans) {
+      lines.push(`⚠️ 对不上账：文件不见了 ${i.missing} 条 · 重复记录 ${i.duplicated} 条 · 标记和位置不一致 ${i.mismarked} 条 · 磁盘上有、索引里没有 ${i.orphans} 条`
+        + '\n   （明细用 kind="check"；要我修就加上 repair=true）');
+    } else {
+      lines.push('索引和磁盘对得上 ✓');
+    }
+    return lines.join('\n');
+  };
+
+  /** 对账的排版（dfy_works kind="check"）。 */
+  const formatCheck = (c) => {
+    const head = `对账：索引 ${c.total} 条`;
+    if (c.ok) return `${head}\n都对得上 ✓（文件都在、没有重复、标记和位置一致、没有漏登记的）`;
+    const lines = [head];
+    lines.push(`  文件不见了 ${c.missing} 条`);
+    for (const x of c.items.missing.slice(0, 8)) lines.push(`    · ${x.category}/${x.file}`);
+    if (c.duplicated) {
+      lines.push(`  同一个文件被多条索引指着 ${c.duplicated} 条（列表里只显示最新的那条）`);
+      for (const x of c.items.duplicated.slice(0, 8)) lines.push(`    · ${x.category}/${x.file}`);
+    }
+    if (c.mismarked) {
+      lines.push(`  标记和位置不一致 ${c.mismarked} 条（列表按路径走，不影响你看，但容易误会）`);
+      for (const x of c.items.mismarked.slice(0, 8)) lines.push(`    · ${x.category}/${x.file} → 其实在「${x.kind}」`);
+    }
+    if (c.orphans) {
+      lines.push(`  磁盘上有、索引里没有 ${c.orphans} 条（手工搬/改名后落在这里，列表里看不见）`);
+      for (const x of c.items.orphans.slice(0, 8)) lines.push(`    · ${x.category}/${x.file}`);
+    }
+    lines.push('想修就再调一次 dfy_works(kind="check", repair=true)：只动索引，不碰文件。');
+    return lines.join('\n');
+  };
+
   tool({
     name: 'dfy_work_save',
     description: '把**你自己写的东西**存进作品库，长期留着。适合：你觉得写得好的诗/短文/小作文、想留作纪念的话。'
-      + '存进去就是一件作品，文件名就是标题；同名不会覆盖，会自动加 -2。',
+      + '**必须先指定项目**（project）——项目要先 dfy_work_project 建出来；项目里怎么分类（path）你自己定。'
+      + '同名不会覆盖，旧稿自动进该项目的 archive。'
+      + '**不传 sub 就跟着同名旧稿原来的位置走**（不会再掉到项目根），要换层就明说 sub。',
     parameters: {
       title: { type: 'string', description: '作品标题（会成为文件名）。别带 \\ / : * ? " < > | 这些字符' },
       text: { type: 'string', description: '作品正文。存你真正写出来的东西，不是汇报' },
+      project: { type: 'string', description: '**必填**：存进哪个项目（必须已经 dfy_work_project 建过）' },
+      sub: { type: 'string', description: '可选：项目内的子分类，如 "前传"；可以多级 "卷一/上"。**不填就沿用同名旧稿所在的那一层**' },
       tags: { type: 'array', items: { type: 'string' }, description: '可选标签，如 ["诗","夜晚"]' },
     },
     async execute(args) {
+      const p = pickProject(args, 'text');
+      if (p.error) return p.error;
       try {
-        const r = f.works.saveText({ title: args.title, text: args.text, tags: args.tags });
-        return `存好了 ✓「${r.title}」\n分类：文字 · ${r.bytes} 字节 · ${r.created}\n文件：${r.path}`;
+        const r = f.works.saveText({ title: args.title, text: args.text, tags: args.tags, project: p.name, sub: args.sub });
+        return `存好了 ✓「${r.title}」\n项目：${r.project}${r.sub ? ' / ' + r.sub : ''} · ${r.bytes} 字节 · ${r.created}\n文件：${r.path}`
+          + (r.archivedOld ? `\n（同名旧稿 ${r.archivedOld} 份已进 ${r.project}/archive，没丢）` : '')
+          + (r.inheritedSub ? `\n（没指定子分类，跟着旧稿留在「${r.sub}」）` : '');
       } catch (e) {
         return `没存成：${e?.message ?? e}`;
       }
@@ -1045,15 +1206,17 @@ export function registerTools(ctx, facade, log = () => {}) {
 
   tool({
     name: 'dfy_work_archive',
-    description: '把某件作品的**当前稿**收进归档（不换新稿，只是想留一份的时候用）。同名再存一次时也会自动归档旧稿，所以平时不用特意调它。',
+    description: '把某件作品的**当前稿**收进归档（不换新稿，只是想留一份的时候用）。同名再存一次时也会自动归档旧稿，所以平时不用特意调它。'
+      + '归档落在**该项目**的 archive/ 下；不传 project 就在所有项目里按标题找。',
     parameters: {
       title: { type: 'string', description: '作品标题' },
       category: { type: 'string', description: '可选：text / image；不填就按标题找' },
+      project: { type: 'string', description: '可选：限定某个项目（同名作品散在多个项目时用）' },
     },
     async execute(args = {}) {
       const title = String(args.title ?? '').trim();
       if (!title) return '要告诉我归档哪一件（标题）。';
-      const r = f.works.archive({ title, category: args.category });
+      const r = f.works.archive({ title, category: args.category, project: args.project });
       if (!r.archived) return `「${title}」没有当前稿可归档（可能已经归档过了）。`;
       return `归档了 ${r.archived} 份：` + r.items.map((x) => `\n  ${x.category}/${x.file}`).join('');
     },
@@ -1065,11 +1228,12 @@ export function registerTools(ctx, facade, log = () => {}) {
     parameters: {
       title: { type: 'string', description: '作品标题' },
       category: { type: 'string', description: '可选：text / image' },
+      project: { type: 'string', description: '可选：限定某个项目' },
     },
     async execute(args = {}) {
       const title = String(args.title ?? '').trim();
       if (!title) return '要告诉我看哪一件的历史版本（标题）。';
-      const rows = f.works.versions({ title, category: args.category });
+      const rows = f.works.versions({ title, category: args.category, project: args.project });
       if (!rows.length) return `「${title}」还没有历史版本。`;
       const lines = rows.map((e) => `  ${e.archivedAt ?? e.created}  ${e.category}/${e.file}`);
       return `「${title}」的历史版本（${rows.length} 份，新的在前）：\n` + lines.join('\n');
@@ -1082,12 +1246,13 @@ export function registerTools(ctx, facade, log = () => {}) {
     parameters: {
       title: { type: 'string', description: '作品标题' },
       category: { type: 'string', description: '可选：text / image' },
+      project: { type: 'string', description: '可选：限定某个项目' },
       file: { type: 'string', description: '可选：指定哪个历史版本（用 dfy_work_versions 看到的文件名）；不填取最新' },
     },
     async execute(args = {}) {
       const title = String(args.title ?? '').trim();
       if (!title) return '要告诉我恢复哪一件（标题）。';
-      const r = f.works.restore({ title, category: args.category, file: args.file });
+      const r = f.works.restore({ title, category: args.category, file: args.file, project: args.project });
       if (!r.restored) return `没恢复成：${r.reason ?? '未知原因'}（先用 dfy_work_versions 看看有哪些版本）`;
       return `恢复了 ✓「${r.title}」${r.category}/${r.file}` + (r.archivedOld ? `\n（原来的当前稿已归档，不丢）` : '');
     },
@@ -1095,19 +1260,23 @@ export function registerTools(ctx, facade, log = () => {}) {
 
   tool({
     name: 'dfy_work_draft',
-    description: '存一版**草稿**：大纲、随手记、试画都放这儿。同一个标题可以存很多版，不覆盖（自动带时间戳）。草稿不算作品，写好以后用 dfy_work_finalize 定稿。',
+    description: '存一版**草稿**：大纲、随手记、试画都放这儿。同一个标题可以存很多版，不覆盖（自动带时间戳）。'
+      + '草稿落在**该项目**的 drafts/ 下（每个项目只有一个草稿箱）；写好以后用 dfy_work_finalize 定稿。',
     parameters: {
       title: { type: 'string', description: '草稿标题（定稿时用同一个标题）' },
       text: { type: 'string', description: '文字草稿正文（category=text 时必填）' },
       source: { type: 'string', description: '图片草稿：源图片的绝对路径（category=image 时必填）' },
       category: { type: 'string', description: 'text 或 image，默认 text' },
+      project: { type: 'string', description: '**必填**：这份草稿属于哪个项目' },
     },
     async execute(args = {}) {
       const title = String(args.title ?? '').trim();
       if (!title) return '草稿得有个标题。';
+      const p = pickProject(args, args.category || 'text');
+      if (p.error) return p.error;
       try {
-        const r = f.works.saveDraft({ title, text: args.text, source: args.source, category: args.category });
-        return `草稿存好了 ✓ ${r.category}/${r.file}`;
+        const r = f.works.saveDraft({ title, text: args.text, source: args.source, category: args.category, project: p.name });
+        return `草稿存好了 ✓ ${r.category}/${r.file}\n项目：${r.project}`;
       } catch (e) {
         return '没存成：' + String(e?.message ?? e);
       }
@@ -1116,49 +1285,91 @@ export function registerTools(ctx, facade, log = () => {}) {
 
   tool({
     name: 'dfy_work_drafts',
-    description: '看草稿箱（新的在前）。可以只看某个标题的草稿；想看内容用 dfy_work_read（传 file）。',
+    description: '看草稿箱（新的在前）。可以只看某个标题、某个项目的草稿；想看内容用 dfy_work_read（传 file）。'
+      + 'action="archive" 用来**清理**：每个标题只留最新几版，旧的挪进该项目的 archive/（标成「旧草稿」，**不删**）。'
+      + '草稿攒太多（一个标题存了七八版）时用它；建议先 preview=true 看一眼。',
     parameters: {
+      action: { type: 'string', enum: ['list', 'archive'], description: 'list（默认）= 看草稿箱；archive = 清理旧草稿' },
       title: { type: 'string', description: '可选：只看这个标题的草稿' },
       category: { type: 'string', description: '可选：text / image' },
+      project: { type: 'string', description: '可选：只看这个项目的草稿；action=archive 时**必填**' },
+      prefix: { type: 'string', description: '可选：标题前缀过滤' },
       limit: { type: 'number', description: '最多列几份，默认 20' },
+      keep: { type: 'number', description: 'action=archive 时每个标题留几版，默认 2；0 = 这个标题全收走' },
+      preview: { type: 'boolean', description: 'action=archive 时只看会动哪些，不真搬' },
     },
     async execute(args = {}) {
-      const r = f.works.drafts({ title: args.title, category: args.category, limit: args.limit ?? 20 });
+      const action = String(args.action ?? 'list').toLowerCase();
+      if (action === 'archive') {
+        const p = pickProject(args, args.category || 'text');
+        if (p.error) return p.error;
+        const r = f.works.cleanDrafts({
+          project: p.name,
+          title: args.title,
+          category: args.category,
+          keep: args.keep ?? 2,
+          preview: args.preview === true,
+        });
+        if (r.preview) {
+          const head = `只是看看：${r.titles} 个标题 · 现在 ${r.kept + r.wouldArchive} 份，每个标题留最新 ${r.keep} 版 → 会挪走 ${r.wouldArchive} 份`;
+          if (!r.wouldArchive) return `${head}\n（没有超过 ${r.keep} 版的标题）`;
+          return `${head}\n` + r.items.slice(0, 20).map((x) => `  ·「${x.title}」${x.file}`).join('\n')
+            + '\n真要动就把 preview 去掉。';
+        }
+        if (!r.archived) {
+          return `草稿箱不用清：${r.titles} 个标题 · ${r.kept} 份都没超过 ${r.keep} 版。`;
+        }
+        return `清理了 ${r.archived} 份旧草稿 ✓（${r.titles} 个标题，每个留最新 ${r.keep} 版）\n`
+          + r.items.slice(0, 15).map((x) => `  ·「${x.title}」→ ${x.project}/archive/`).join('\n')
+          + '\n旧草稿进了 archive，没删；要找回来看 dfy_works(kind="archive")。'
+          + (r.failed?.length ? `\n⚠️ ${r.failed.length} 份没挪成：${r.failed.slice(0, 5).map((x) => x.file).join('、')}` : '');
+      }
+      const r = f.works.drafts({ title: args.title, category: args.category, project: args.project, prefix: args.prefix, limit: args.limit ?? 20 });
       if (!r.total) return '草稿箱是空的。';
-      const lines = r.items.map((e) => `  ${e.created}  ${e.category}/${e.file}`);
-      return `草稿 ${r.total} 份（新的在前）：\n` + lines.join('\n') + '\n（用 dfy_work_finalize 把最新那版定稿）';
+      const lines = r.items.map((e) => `  ${e.created}  ${e.category}/${e.file}${e.project ? `  〔${e.project}〕` : ''}`);
+      return `草稿 ${r.total} 份（新的在前）：\n` + lines.join('\n') + '\n（用 dfy_work_finalize 把最新那版定稿；版本太多用 action="archive" 清）';
     },
   });
 
   tool({
     name: 'dfy_work_finalize',
-    description: '把某个标题的**最新一版草稿定稿**：它成为正式作品。草稿本身留在 drafts/ 里不搬家——草稿箱就是草稿，不套归档层。',
+    description: '把某个标题的**最新一版草稿定稿**：它成为正式作品。草稿本身留在 drafts/ 里不搬家——草稿箱就是草稿，不套归档层。'
+      + '定稿落在该项目的哪一层由 path 决定；**不传 path 就跟同名旧稿原来的位置走**（不会掉到项目根）。',
     parameters: {
       title: { type: 'string', description: '草稿标题' },
       category: { type: 'string', description: 'text 或 image，默认 text' },
+      project: { type: 'string', description: '**必填**：这份草稿属于哪个项目' },
+      sub: { type: 'string', description: '可选：定稿放到项目里哪一层，如 "前传"；不填就沿用同名旧稿所在的那一层' },
     },
     async execute(args = {}) {
       const title = String(args.title ?? '').trim();
       if (!title) return '要告诉我定稿哪一份（标题）。';
-      const r = f.works.finalize({ title, category: args.category });
+      const p = pickProject(args, args.category || 'text');
+      if (p.error) return p.error;
+      const r = f.works.finalize({ title, category: args.category, project: p.name, sub: args.sub });
       if (!r.finalized) return `没定稿：${r.reason ?? '未知原因'}`;
       return `定稿了 ✓「${r.work.title}」→ ${r.work.category}/${r.work.file}`
-        + (r.draftsKept ? `\n（${r.draftsKept} 份草稿还留在 ${r.work.category}/drafts/ 里，没动）` : '');
+        + (r.draftsKept ? `\n（${r.draftsKept} 份草稿还留在 ${r.work.project}/drafts/ 里，没动）` : '');
     },
   });
 
   tool({
     name: 'dfy_work_image',
     description: '把**一张图**存进作品库（比如你用 dfy_draw 画出来的、或者你觉得好看想留着的图）。'
-      + '只复制文件，不动原图；文件名就是标题。',
+      + '只复制文件，不动原图；文件名就是标题。**必须先指定项目**。',
     parameters: {
       title: { type: 'string', description: '作品标题（会成为文件名）' },
-      path: { type: 'string', description: '图片的绝对路径（dfy_draw 返回的那个路径就行）' },
+      path: { type: 'string', description: '图片的**绝对路径**（dfy_draw 返回的那个路径就行）' },
+      project: { type: 'string', description: '**必填**：存进哪个项目' },
+      sub: { type: 'string', description: '可选：项目内的子分类，如 "插画"' },
     },
     async execute(args) {
+      const p = pickProject(args, 'image');
+      if (p.error) return p.error;
       try {
-        const r = f.works.saveImage({ title: args.title, source: args.path });
-        return `存好了 ✓「${r.title}」\n分类：图片 · ${(r.bytes / 1024).toFixed(0)} KB · ${r.created}\n文件：${r.path}`;
+        const r = f.works.saveImage({ title: args.title, source: args.path, project: p.name, sub: args.sub });
+        return `存好了 ✓「${r.title}」\n项目：${r.project}${r.sub ? ' / ' + r.sub : ''} · ${(r.bytes / 1024).toFixed(0)} KB · ${r.created}\n文件：${r.path}`
+          + (r.archivedOld ? `\n（同名旧图已进 ${r.project}/archive，没丢）` : '');
       } catch (e) {
         return `没存成：${e?.message ?? e}`;
       }
@@ -1167,17 +1378,43 @@ export function registerTools(ctx, facade, log = () => {}) {
 
   tool({
     name: 'dfy_works',
-    description: '看看你自己的作品库里有什么（按类别：文字 / 图片）。想知道自己都创作过什么、或者要引用旧作时用。',
+    description: '看作品库。默认列当前稿；也可以按项目、按标题前缀过滤，或者看草稿箱 / 归档 / 还没归项目的散件。'
+      + 'kind="overview" 是**总览**：项目、子分类、草稿、归档各多少件，最近动过哪几件。'
+      + 'kind="check" 是**对账**：索引和磁盘对不上的地方（加 repair=true 才修）。',
     parameters: {
       category: { type: 'string', enum: ['text', 'image'], description: '只看某一类；不填就是全部' },
-      limit: { type: 'number', description: '最多几条，默认 30' },
+      project: { type: 'string', description: '可选：只看这个项目' },
+      kind: { type: 'string', enum: ['works', 'drafts', 'archive', 'root', 'overview', 'check'], description: '看什么：当前稿（默认）/ 草稿 / 历史版本 / 还没归项目的散件 / overview=总览 / check=对账' },
+      prefix: { type: 'string', description: '可选：标题前缀过滤，如 "白饭派·前传"' },
+      limit: { type: 'number', description: '最多几条，默认 30（上限 100）' },
+      repair: { type: 'boolean', description: '只在 kind="check" 时有用：true = 顺手把对不上的账修掉（只动索引，不碰文件）' },
     },
     async execute(args) {
-      const r = f.works.list({ category: args.category, limit: args.limit });
-      const head = `作品库：${r.dir}\n共 ${r.total} 件（文字 ${r.byCat.text || 0} · 图片 ${r.byCat.image || 0}）`;
-      if (!r.items.length) return `${head}\n\n还空着。想留下的东西，用 dfy_work_save / dfy_work_image 存进来。`;
-      const lines = r.items.map((e) => `- [${e.category === 'image' ? '图' : '文'}] 「${e.title}」 ${e.created.replace('T', ' ')} · ${e.file}`);
-      return `${head}\n\n${lines.join('\n')}`;
+      const kind = String(args.kind ?? 'works').toLowerCase();
+      if (kind === 'overview') return formatOverview(f.works.overview());
+      if (kind === 'check') {
+        const before = f.works.check();
+        if (!args.repair) return formatCheck(before);
+        const rep = f.works.repair();
+        const after = f.works.check();
+        return `修账：删掉 ${rep.removed} 条对不上的记录，把 ${rep.fixed} 条的标记改回和位置一致，`
+          + `把 ${rep.adopted} 个漏登记的文件补进索引（文件一个没动）\n\n`
+          + formatCheck(after)
+          + (rep.removedItems.length ? `\n删掉的（${rep.removedItems.length} 条）：` + rep.removedItems.slice(0, 8).map((x) => `\n  · ${x.category ?? ''}/${x.file} —— ${x.reason}`).join('') : '')
+          + (rep.adoptedItems?.length ? `\n补登记的（${rep.adoptedItems.length} 条）：` + rep.adoptedItems.slice(0, 8).map((x) => `\n  · ${x.category}/${x.file}`).join('') : '');
+      }
+      const r = f.works.list({ category: args.category, project: args.project, kind: args.kind, prefix: args.prefix, limit: args.limit });
+      const kindLabel = { works: '当前稿', drafts: '草稿', archive: '历史版本', root: '还没归项目的散件' }[r.kind] || r.kind;
+      const head = `作品库：${r.dir}\n${kindLabel} 共 ${r.total} 条（文字 ${r.byCat.text || 0} · 图片 ${r.byCat.image || 0}）`;
+      if (!r.items.length) {
+        return `${head}\n\n空了。${r.kind === 'root' ? '没有散件，都归项目了。' : '想留下的东西用 dfy_work_save / dfy_work_image 存进来。'}`;
+      }
+      const lines = r.items.map((e) => {
+        const proj = e.project ? `〔${e.project}${e.sub ? '/' + e.sub : ''}〕` : '〔未归项目〕';
+        const tag = e.archivedDraft ? '旧草稿·' : '';
+        return `- [${tag}${e.category === 'image' ? '图' : '文'}] ${proj}「${e.title}」 ${String(e.created).replace('T', ' ')} · ${e.file}`;
+      });
+      return `${head}\n\n${lines.join('\n')}${r.total > r.items.length ? `\n…（还有 ${r.total - r.items.length} 条，用 limit 或 prefix 收窄）` : ''}`;
     },
   });
 
@@ -1187,14 +1424,100 @@ export function registerTools(ctx, facade, log = () => {}) {
     parameters: {
       title: { type: 'string', description: '作品标题' },
       category: { type: 'string', enum: ['text', 'image'], description: '可选：限定类别（同名时用）' },
-      file: { type: 'string', description: '可选：直接用文件名（dfy_works 里能看到）' },
+      project: { type: 'string', description: '可选：限定项目（同名作品散在多个项目时用）' },
+      file: { type: 'string', description: '可选：直接用相对路径（dfy_works 里能看到，形如 "白饭派/前传/第一回.md"）' },
     },
     async execute(args) {
-      const r = f.works.read({ title: args.title, category: args.category, file: args.file });
+      const r = f.works.read({ title: args.title, category: args.category, file: args.file, project: args.project });
       if (!r.found) return `没找到这件作品${r.missing ? `（文件不见了：${r.missing}）` : ''}。用 dfy_works 看看有哪些。`;
       if (r.category === 'image') return `「${r.title}」是图片作品（${(r.bytes / 1024).toFixed(0)} KB · ${r.created}）\n${r.path}`;
       const body = r.text.length > 4000 ? `${r.text.slice(0, 4000)}\n…（后面还有 ${r.text.length - 4000} 字，用文件路径去看全文）` : r.text;
-      return `「${r.title}」（${r.created} · ${r.chars} 字）\n文件：${r.path}\n\n${body}`;
+      return `「${r.title}」（${r.created} · ${r.chars} 字 · ${r.project ? r.project + (r.sub ? '/' + r.sub : '') : '未归项目'}）\n文件：${r.path}\n\n${body}`;
+    },
+  });
+
+  // ── 项目管理（2026-11-21）────────────────────────────────
+  tool({
+    name: 'dfy_work_project',
+    description: '管理作品库的**项目**。项目必须先建出来，才能往里存东西（dfy_work_save / draft / image 都要求 project）。'
+      + '一个项目下只有一个 drafts/ 和 archive/；项目里怎么分子类（前传/正传/设定…）由你自己定，不用注册。',
+    parameters: {
+      action: { type: 'string', enum: ['list', 'create', 'rename'], description: 'list=看有哪些项目；create=建一个；rename=改名' },
+      name: { type: 'string', description: 'create/rename 时必填：项目名' },
+      to: { type: 'string', description: 'rename 时必填：新名字' },
+      category: { type: 'string', enum: ['text', 'image'], description: '项目属于哪一类，默认 text' },
+      description: { type: 'string', description: '可选：一句话说明这个项目是什么' },
+    },
+    async execute(args = {}) {
+      const action = String(args.action ?? 'list').toLowerCase();
+      try {
+        if (action === 'list') {
+          const list = f.works.projects({});
+          if (!list.length) return '还没有任何项目。\n建一个：dfy_work_project(action="create", name="白饭派", category="text")';
+          const lines = list.map((p) => {
+            const flag = p.unregistered ? ' ⚠️未注册（目录在、注册表没有）' : (p.exists ? '' : ' ⚠️目录不见了');
+            const sub = p.subdirs.length ? `\n      子分类：${p.subdirs.join(' / ')}` : '\n      子分类：还没有';
+            return `- 「${p.name}」（${p.category}）${flag}\n      作品 ${p.works} · 草稿 ${p.drafts} · 历史版本 ${p.archives}${sub}`
+              + (p.description ? `\n      说明：${p.description}` : '');
+          });
+          return `共 ${list.length} 个项目：\n${lines.join('\n')}`;
+        }
+        if (action === 'create') {
+          const r = f.works.createProject({ name: args.name, category: args.category, description: args.description });
+          return `项目「${r.name}」已就绪 ✓（${r.category}）\n目录：${r.dir}\ndrafts/ 和 archive/ 都建好了。往里头存：dfy_work_save(title="…", text="…", project="${r.name}")`;
+        }
+        if (action === 'rename') {
+          const r = f.works.renameProject({ from: args.name, to: args.to, category: args.category });
+          if (!r.renamed) return `没改名：${r.reason ?? '未知原因'}`;
+          return `改名了 ✓「${r.from}」→「${r.to}」（${r.category}）\n索引更新了 ${r.indexUpdated} 条`;
+        }
+        return `action 只能是 list / create / rename（收到 "${args.action}"）`;
+      } catch (e) {
+        return `没成：${e?.message ?? e}`;
+      }
+    },
+  });
+
+  // ── 搬家（2026-11-21）────────────────────────────────────
+  tool({
+    name: 'dfy_work_move',
+    description: '把作品/草稿/归档**搬到项目里**（或搬回类型根目录）。这是整理作品库的主力工具：一次最多 50 个，'
+      + '搬错了可以用 to="root" 搬回去。项目必须先注册；子分类（path）会自动建。'
+      + '目标位置已有同名时由 onConflict 决定：skip=跳过（默认）/ overwrite=挡路的那份收进它自己的 archive 再搬进去 / rename=新文件改叫「标题 (2)」。',
+    parameters: {
+      items: { type: 'array', items: { type: 'string' }, description: '要搬的标题数组（一次最多 50 个）' },
+      project: { type: 'string', description: '目标项目（from=project 时是源项目；to=root 时也传它）' },
+      sub: { type: 'string', description: '可选：项目内的子分类，不存在会自动建' },
+      category: { type: 'string', enum: ['text', 'image'], description: '可选：限定类别' },
+      from: { type: 'string', enum: ['root', 'drafts', 'archive', 'project'], description: '从哪搬：类型根下的散件（默认）/ 草稿 / 归档 / 项目内' },
+      to: { type: 'string', enum: ['project', 'root'], description: '搬到哪：项目里（默认）/ 搬回类型根目录' },
+      onConflict: { type: 'string', enum: ['skip', 'overwrite', 'rename'], description: '目标已有同名时：skip=跳过（默认）/ overwrite=把挡路的那份收进归档（不丢）再搬进去 / rename=自动改名「标题 (2)」' },
+    },
+    async execute(args = {}) {
+      const items = Array.isArray(args.items) ? args.items : [];
+      if (!items.length) return '要给我 items（标题数组）。先用 dfy_works(kind="root") 看看有哪些。';
+      const from = String(args.from ?? 'root').toLowerCase();
+      const to = String(args.to ?? 'project').toLowerCase();
+      // 往项目里搬才要求项目；搬回 root 时项目只用来定位来源
+      if (to === 'project') {
+        const p = pickProject(args, args.category);
+        if (p.error) return p.error;
+        args = { ...args, project: p.name };
+      }
+      try {
+        const r = f.works.move({
+          items, project: args.project, sub: args.sub, category: args.category, from, to,
+          onConflict: args.onConflict ?? 'skip',
+        });
+        const lines = [`搬了 ${r.moved} 个`];
+        if (r.overwritten) lines.push(`盖掉了 ${r.overwritten} 个同名的（原来那份已进 archive，没丢）：\n` + r.overwrittenItems.map((x) => `  · 「${x.title}」${x.was} → ${x.file}`).join('\n'));
+        if (r.skipped) lines.push(`跳过 ${r.skipped} 个：\n` + r.skippedItems.map((x) => `  · ${x.title} —— ${x.reason}`).join('\n'));
+        if (r.missing) lines.push(`没找到 ${r.missing} 个：\n` + r.missingItems.map((x) => `  · ${x.title} —— ${x.reason}`).join('\n'));
+        if (r.moved) lines.push('搬到：\n' + r.items.map((x) => `  · 「${x.title}」${x.from} → ${x.to}${x.renamed ? '（改了名）' : ''}`).join('\n'));
+        return lines.join('\n');
+      } catch (e) {
+        return `没搬成：${e?.message ?? e}`;
+      }
     },
   });
 
@@ -1213,7 +1536,11 @@ export function apply(ctx, config = {}) {
     try { ctx?.logger?.info?.(msg) } catch { /* 没有 logger 就算了 */ }
   };
 
-  const facade = createMemoryFacade(paths);
+  // 桥接的 config.json：既是调参的真源，也是目录同步的落点。先找出来，门面和路由都要用。
+  const bridgeConfig = locateBridgeConfig(config, paths);
+  const cfgProvider = () => toCfg(readTuning(bridgeConfig).values, paths.memoryDir);
+
+  const facade = createMemoryFacade(paths, { cfgProvider });
   try { ctx?.provide?.('dfyMemory', facade) } catch { /* 宿主没有 provide 也不影响加载 */ }
 
   if (config.enabled === false) {
@@ -1228,16 +1555,54 @@ export function apply(ctx, config = {}) {
     log('[dfy-memory] 没有 tools 服务，跳过工具注册（数据层仍可用）');
   }
 
-  // 设置页的后端：/api/dfy-memory/{state,config,switch}
+  // 设置页的后端：/api/dfy-memory/*
   // 用 ctx.effect 包起来，插件卸载时路由会一起摘掉。
   if (ctx?.webServer?.register) {
     try {
+      if (!bridgeConfig) log('[dfy-memory] 没找到桥接 config.json —— 调参和目录同步会是只读的');
+      const asPaths = (p) => ({
+        dataRoot: p.dataRoot,
+        defaultDataRoot: DEFAULT_DATA_ROOT,
+        envDataRoot: String(process.env.DFY_DATA_DIR || '').trim() || null,
+        configDataRoot: String(config?.dataRoot || '').trim() || null,
+        derived: {
+          memory: p.memoryDir,
+          diary: p.diaryDir,
+          state: p.stateDir,
+          works: p.worksDir,
+          mailbox: p.mailDir,
+          context: path.join(p.dataRoot, 'context'),
+          archive: path.join(p.dataRoot, 'archive'),
+        },
+      });
+      const hub = {
+        // 报的是**这次 apply 真正用上的**路径，不拿旧 config 重新算一遍
+        describe: () => ({
+          ...asPaths(paths),
+          source: String(process.env.DFY_DATA_DIR || '').trim()
+            ? 'env'
+            : (String(config?.dataRoot || '').trim() ? 'config' : 'default'),
+        }),
+        // 改完之后会变成什么（插件重启期间设置页要能立刻显示新值）
+        previewPaths: (next) => {
+          const p = resolvePaths({ ...config, dataRoot: next });
+          return asPaths(p);
+        },
+        saveDataRoot: makeSaveDataRoot(ctx),
+        bridgeConfig,
+        defaultDataRoot: DEFAULT_DATA_ROOT,
+        // 调参：真源是桥接 config.json，读写都走 lib/tuning.js
+        tuning: () => readTuning(bridgeConfig),
+        spec: () => TUNING_SPEC,
+        defaults: () => TUNING_DEFAULTS,
+        saveTuning: (patch) => writeTuning(bridgeConfig, patch),
+      };
       const register = () => ctx.webServer.register({
         kind: 'prefix',
         path: '/api/dfy-memory',
         handler: async (req, res) => {
           try {
-            await handleApi(req, res, new URL(req.url, 'http://127.0.0.1'), facade, paths);
+            await handleApi(req, res, new URL(req.url, 'http://127.0.0.1'), facade, paths, hub);
           } catch (e) {
             try {
               res.statusCode = 500;
@@ -1257,7 +1622,46 @@ export function apply(ctx, config = {}) {
     log('[dfy-memory] 没有 webServer 服务，跳过设置页端点');
   }
 
-  log(`[dfy-memory] 已加载 · memory=${paths.memoryDir} · state=${paths.stateDir} · 工具 ${registered.length} 个`);
+  log(`[dfy-memory] 已加载 · dataRoot=${paths.dataRoot} · memory=${paths.memoryDir} · 工具 ${registered.length} 个`);
+}
+
+/**
+ * 找桥接的 config.json。
+ * 顺序：DFY_BRIDGE_CONFIG > 插件 config.bridgeConfig > 插件仓库的兄弟目录
+ *      （qq-bridge/plugins/dsh-dfy-memory → qq-bridge/config.json）> <dataRoot>/../qq-bridge。
+ * 只认「长得像桥接配置」的那个；一个都不像就返回 null —— 绝不凭空造一个空文件出来
+ * （2026-11-22 之前正是因为路径算错，把一个野 config.json 写到了数据目录里）。
+ */
+function locateBridgeConfig(config = {}, paths = {}) {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const cands = [];
+  if (process.env.DFY_BRIDGE_CONFIG) cands.push(process.env.DFY_BRIDGE_CONFIG);
+  if (config.bridgeConfig) cands.push(String(config.bridgeConfig));
+  cands.push(path.join(here, '..', '..', 'config.json'));
+  if (paths.dataRoot) cands.push(path.join(path.dirname(paths.dataRoot), 'qq-bridge', 'config.json'));
+  for (const c of cands) {
+    try {
+      const abs = path.resolve(c);
+      if (fs.existsSync(abs) && looksLikeBridgeConfig(abs)) return abs;
+    } catch { /* 换下一个 */ }
+  }
+  return null;
+}
+
+/**
+ * 改数据根目录：走 DSH 的 configEditor 写进 profile 的 cordis.patch.yml（用户层）。
+ * 好处：升级插件不会把使用者的选择覆盖掉；改完插件自己重启一次，不用重启 DSH。
+ * ⚠️ 存不了就抛错，不假装成功。
+ */
+function makeSaveDataRoot(ctx) {
+  return async (next) => {
+    const editor = typeof ctx?.get === 'function' ? ctx.get('configEditor') : undefined;
+    const entry = ctx?.fiber?.entry;
+    if (!editor?.edit || entry === undefined) {
+      throw new Error('这个 profile 里存不了配置（没有 configEditor 服务，或拿不到当前插件行）');
+    }
+    await editor.edit(entry, (cur) => ({ ...(cur || {}), dataRoot: next }));
+  };
 }
 
 
