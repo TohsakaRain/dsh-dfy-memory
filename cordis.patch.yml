@@ -1,22 +1,15 @@
 # ============================================================================
-# dsh-dfy-memory —— 人格数据层插件（骨架版）
+# dsh-dfy-memory —— 人格数据层插件
 # ============================================================================
-# 这一版**只搬运数据与算法**：长期记忆（分层 + 遗忘曲线）、心情/好感度、
-# 承诺。它**不注册任何工具**，也不往任何 prompt 里注入东西 —— 装上等于没装，
-# 唯一的可见效果是启动日志里多一行 "[dsh-dfy-memory] 已加载"。
+# 加载时做两件事：
+#   1) 注册 40 个 dfy_* 工具（长期记忆 / 心情·好感 / 承诺 / 日记 / 对话窗口 / 作品库 / 邮箱）
+#   2) 挂上只读 HTTP 端点 /api/dfy-memory/*（设置页和宿主都从这儿取）
 #
-# 为什么先生成一个"什么都不做"的插件：
-#   1. 把打包/加载这条路先跑通（package.json → bundle patch → 插件 apply）
-#   2. 数据层可以独立自检（selfcheck.mjs），不依赖 DSH、不依赖桥接
-#   3. 后面两步（工具搬迁、注入搬迁）才有地方落，且每一步都能单独回滚
+# 它**不往任何 prompt 里注入东西**：注入是宿主的事，宿主通过
+#   GET /api/dfy-memory/prompt-block  或  facade.memory.forPrompt()  拿文本。
 #
-# 后续步骤（未做）：
-#   · 注册工具：memory_save/recall/touch/update/forget/stats、mood/affinity、
-#     promise/promises/drop
-#   · 注入：agent/pre-step 或在桥接里读本插件导出的 renderInjection()
-#   · 两者都接好之后，把宿主里那几段旧实现删掉
+# 数据默认在 ~/.dsh/dsh-dfy-memory/（memory/ diary/ state/ works/ mailbox/ context/ archive/）
 # ============================================================================
-
 - insert:
     - id: dfy-memory
       name: dsh-dfy-memory
