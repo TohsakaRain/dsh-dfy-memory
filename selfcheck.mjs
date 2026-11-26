@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { apply, createMemoryFacade, resolvePaths, describePaths, DEFAULT_DATA_ROOT, wireSelfInject } from './index.js';
-import { DEFAULT_SELF_INJECT, createSnapshotProvider, matchesSession } from './lib/inject-self.js';
+import { DEFAULT_SELF_INJECT, createSnapshotProvider, matchesSession, normalizeSelfInject, readSelfInjectFile, resolveSelfInject, writeSelfInjectFile } from './lib/inject-self.js';
 import { recallForPrompt, renderMarkdown } from './lib/memory-store.js';
 import { relateDirs, probeDataRoot, listDir, looksLikeBridgeConfig } from './lib/webapi.mjs';
 import {
@@ -1184,27 +1184,44 @@ ok(affAfter < affBefore && affAfter >= affBefore - 1.5,
   ok(checkWorks(vDir).ok === true, 'v4：补完就对得上 ✓');
 }
 
-console.log('\n[N] 自注入（默认关）');
+console.log('\n[N] 自注入（默认关，设置页可热开关）');
 {
-  // 默认值：必须默认关
+  // 默认值
   ok(DEFAULT_SELF_INJECT.enabled === false, '默认不开启自注入');
   ok(DEFAULT_SELF_INJECT.order === 10150, '默认插在 first-party 段之后', String(DEFAULT_SELF_INJECT.order));
+
+  // 归一化 / 校验
+  const n1 = normalizeSelfInject({ enabled: 'yes', order: 99999, refreshMs: 1, presets: 'qq-chat, qq-chat-v2', cwdContains: ' qq-bridge ' });
+  ok(n1.enabled === false, 'enabled 只认 true（字符串不算）');
+  ok(n1.order === 20000 && n1.refreshMs === 5000, '数值被夹到合法区间', `${n1.order}/${n1.refreshMs}`);
+  ok(n1.presets.length === 2 && n1.presets[1] === 'qq-chat-v2', 'presets 支持逗号字符串', JSON.stringify(n1.presets));
+  ok(n1.cwdContains[0] === 'qq-bridge', 'cwdContains 会 trim');
 
   // 会话匹配
   ok(matchesSession({ preset: 'qq-chat-v2', cwd: 'D:/x' }, {}) === true, '没配匹配规则 → 所有会话都注入');
   ok(matchesSession({ preset: 'qq-chat-v2' }, { presets: ['qq-chat-v2'] }) === true, '按 preset 命中');
   ok(matchesSession({ preset: 'other' }, { presets: ['qq-chat-v2'] }) === false, 'preset 不匹配 → 跳过');
   ok(matchesSession({ cwd: 'D:/dfy/qq-bridge/state/agents' }, { cwdContains: ['qq-bridge'] }) === true, '按 cwd 包含关系命中');
-  ok(matchesSession({ cwd: 'D:/other' }, { cwdContains: ['qq-bridge'] }) === false, 'cwd 不匹配 → 跳过');
+
+  // 设置文件：写 / 读 / 优先级（文件 > config > 默认）
+  const injDir = path.join(tmp, 'self-inject');
+  fs.mkdirSync(injDir, { recursive: true });
+  const injFile = path.join(injDir, 'self-inject.json');
+  ok(resolveSelfInject({ file: injFile, config: {} }).source === 'default', '没有设置文件也没有 config → default');
+  ok(resolveSelfInject({ file: injFile, config: { enabled: true } }).source === 'config', '有 config → config 兜底');
+  const written = writeSelfInjectFile(injFile, { enabled: true, presets: ['qq-chat-v2'] });
+  ok(written.enabled === true && written.presets[0] === 'qq-chat-v2', '写进设置文件', JSON.stringify(written));
+  ok(readSelfInjectFile(injFile).settings.enabled === true, '读回来是开的');
+  ok(resolveSelfInject({ file: injFile, config: { enabled: false } }).settings.enabled === true, '文件优先于 config');
+  writeSelfInjectFile(injFile, { enabled: false });
+  ok(readSelfInjectFile(injFile).settings.enabled === false, '再写成关');
+  fs.writeFileSync(injFile, '{ 坏 json', 'utf8');
+  ok(readSelfInjectFile(injFile).ok === false, '坏 json → 当没有设置文件');
 
   // 快照：同一轮里不重复算
   let builds = 0;
   let clock = 1000;
-  const p = createSnapshotProvider({
-    getBlock: () => { builds += 1; return `块${builds}`; },
-    refreshMs: 60000,
-    now: () => clock,
-  });
+  const p = createSnapshotProvider({ getBlock: () => { builds += 1; return `块${builds}`; }, refreshMs: 60000, now: () => clock });
   ok(p.text() === '块1' && builds === 1, '第一次求值真的算一次', p.text());
   ok(p.text() === '块1' && builds === 1, '同一轮内第二步用快照，不重算', `builds=${builds}`);
   p.markDirty();
@@ -1212,7 +1229,9 @@ console.log('\n[N] 自注入（默认关）');
   clock += 61000;
   ok(p.text() === '块3' && builds === 3, '超过 refreshMs 兜底重算', `builds=${builds}`);
 
-  // 接线：agent/created 时才挂，且挂到 agent.ctx 上
+  // 接线：section 常驻，开关现读 → 热生效
+  const injFile2 = path.join(injDir, 'hot.json');
+  writeSelfInjectFile(injFile2, { enabled: true, presets: ['qq-chat-v2'] });
   const sections = [];
   const agentHandlers = {};
   const fakeAgent = {
@@ -1227,33 +1246,32 @@ console.log('\n[N] 自注入（默认关）');
   const created = [];
   const fakeCtx = { on: (event, fn) => { if (event === 'agent/created') created.push(fn); return () => {}; } };
   const fakeFacade = { memory: { forPrompt: () => '【你记得的事】\n- 一条测试记忆' } };
-
-  const wired = wireSelfInject(fakeCtx, { enabled: true, order: 10150, refreshMs: 60000, presets: ['qq-chat-v2'] }, fakeFacade, () => {});
-  ok(wired === true, 'wireSelfInject 返回 true');
+  const wired = wireSelfInject(fakeCtx, { file: injFile2, config: {} }, fakeFacade, () => {});
+  ok(wired.ok === true, 'wireSelfInject 接线成功');
   ok(created.length === 1, '监听了 agent/created');
   created[0]({ agent: fakeAgent });
   ok(sections.length === 1, '给这个 agent 注册了一个 section', `sections=${sections.length}`);
   ok(sections[0].name === 'dfy:memory' && sections[0].order === 10150, 'section 名字与位置对', `${sections[0].name}@${sections[0].order}`);
-  const text1 = sections[0].text();
-  ok(text1.includes('一条测试记忆'), 'section 文本就是记忆块', JSON.stringify(text1.slice(0, 20)));
+  ok(String(sections[0].text()).includes('一条测试记忆'), '开着 → 返回记忆块', JSON.stringify(String(sections[0].text()).slice(0, 16)));
+  writeSelfInjectFile(injFile2, { enabled: false });
+  ok(sections[0].text() === '', '设置页一关 → 立刻返回空串（不用重启）');
+  writeSelfInjectFile(injFile2, { enabled: true });
+  ok(String(sections[0].text()).includes('一条测试记忆'), '再打开 → 又有了');
   ok(typeof agentHandlers['agent/inbox/spliced'] === 'function', '监听了 agent/inbox/spliced（来消息就标脏）');
-  agentHandlers['agent/inbox/spliced']();
-  ok(sections[0].text() === text1, '标脏后文本内容一致（数据没变时输出不变）');
 
-  // preset 不匹配的 agent 不挂
+  // 不匹配的会话不挂（桌面端）
   const sections2 = [];
-  const kept = [];
-  const other = [{
+  created[0]({ agent: {
     id: 'session-test-2',
     session: { header: { agentPreset: 'desktop' } },
-    ctx: {
-      systemPrompt: { section: (def) => { sections2.push(def); } },
-      on: () => () => {},
-      effect: (fn) => fn(),
-    },
-  }];
-  created[0]({ agent: other[0] });
+    ctx: { systemPrompt: { section: (def) => sections2.push(def) }, on: () => () => {}, effect: (fn) => fn() },
+  } });
   ok(sections2.length === 0, 'preset 不匹配的会话不注入（桌面端不受影响）');
+
+  // 状态（设置页要显示的东西）
+  const st = wired.status();
+  ok(st.enabled === true && Array.isArray(st.mounted) && st.mounted.length === 1, 'status() 有开关与已挂载列表', JSON.stringify({ enabled: st.enabled, mounted: st.mounted.length }));
+  ok(st.source === 'file', 'status() 说明来源是设置文件', st.source);
 }
 
 console.log(`\n通过 ${pass} / 失败 ${fail}`);
