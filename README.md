@@ -183,7 +183,7 @@ POST /api/dfy-memory/window/roll    7 天窗口滚动
 
 不想显示就把整个 `client` 段删掉——工具和数据都不受影响，只是没那个页面。
 
-**`exports` 里必须有 `"./client": "./client.js"`**，否则 DSH 起不来（见下面的坑 3）。
+**`exports` 里必须有 `"./client": "./client.js"`**——声明了 `dsh.client` 却没有这个导出，DSH 会整个打不开。
 
 ---
 

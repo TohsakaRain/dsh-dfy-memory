@@ -144,3 +144,44 @@ node selfcheck.mjs                          # 全过
 
 `.gitignore` 已经挡住 `memory/ diary/ state/ works/ mailbox/ context/ archive/`、`_backup-*`、`.idea`。
 **永远不要** `git add -f` 去强加这些目录 —— 里面是她真实的记忆和作品。
+
+## 八、加一个工具时必看这两条
+
+DSH 对工具定义有两处**硬约束**，违反了不是"这个工具不可用"，而是**整轮运行失败**。
+插件里已经封好了，照抄就不会踩。
+
+### 1. `parameters` 必须是完整的 JSON Schema
+
+```js
+// ✗ 模型侧直接报错，整轮跑不下去
+parameters: { text: { type: 'string' } }
+
+// ✓ 完整对象
+parameters: {
+  type: 'object',
+  properties: { text: { type: 'string' } },
+  additionalProperties: false,
+}
+```
+
+报错长这样：`Invalid schema for function 'dfy_xxx': schema must be a JSON Schema of 'type: "object"'`。
+
+DSH 的 `defineTool` 在拿得到的时候会帮着转，但桌面版 profile 里它是 optional peer，
+降级实现是"原样返回"——**必须自己写完整**。插件里统一用 `lib/toolkit.mjs` 的
+`toJsonSchema()` 把简写转成完整 schema，新增工具照它的写法调用就行。
+
+### 2. 工具返回值必须是对象
+
+```js
+// ✗ tool "dfy_xxx" returned invalid output: "value" must be an object
+return '好的，记下了'
+
+// ✓ `lib/toolkit.mjs` 的包装会自动把字符串包成 { message }
+return { ok: true, id }
+```
+
+渲染层会把 `{ message }` 取出来当文本显示。**别直接返回字符串或数字**。
+
+> 还有一条是清单层面的（不属于工具本身）：声明了 `dsh.client` 就必须在 `exports` 里
+> 有 `"./client"`，否则 DSH 整个打不开。见 README「设置页」那节。
+
