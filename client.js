@@ -126,6 +126,7 @@ if (typeof window === 'undefined' || !window.__ModuleLoader__?.load) {
       ['status', '大肥鱼状态'],
       ['dir', '数据目录'],
       ['tuning', '记忆参数'],
+      ['inject', '注入'],
       ['about', '介绍'],
     ];
 
@@ -175,6 +176,9 @@ if (typeof window === 'undefined' || !window.__ModuleLoader__?.load) {
       const [tune, setTune] = React.useState(null);
       const [tuneDraft, setTuneDraft] = React.useState({});
       const [tuneBusy, setTuneBusy] = React.useState(false);
+      const [inj, setInj] = React.useState(null);
+      const [injDraft, setInjDraft] = React.useState(null);
+      const [injBusy, setInjBusy] = React.useState(false);
 
       const load = React.useCallback(async () => {
         setErr('');
@@ -526,6 +530,160 @@ if (typeof window === 'undefined' || !window.__ModuleLoader__?.load) {
             h('button', { style: S.btn, disabled: tuneBusy, onClick: loadTuning }, '重新读取')));
       };
 
+      /* ── 注入（自注入开关）──────────────────────────────────────── */
+
+      const loadInject = React.useCallback(async () => {
+        setErr('');
+        try {
+          const r = await jget('/self-inject');
+          setInj(r);
+          const s = r?.settings || {};
+          setInjDraft({
+            enabled: s.enabled === true,
+            order: s.order ?? 10150,
+            refreshMs: s.refreshMs ?? 60000,
+            presets: (s.presets || []).join(', '),
+            cwdContains: (s.cwdContains || []).join(', '),
+          });
+        } catch (e) { setErr(String(e?.message ?? e)); }
+      }, []);
+
+      // 第一次切到「注入」才去读
+      React.useEffect(() => { if (tab === 'inject' && !inj) loadInject(); }, [tab, inj, loadInject]);
+
+      const injPatch = () => {
+        if (!injDraft) return {};
+        const cur = inj?.settings || {};
+        const out = {};
+        const list = (v) => String(v || '').split(',').map((x) => x.trim()).filter(Boolean);
+        if ((injDraft.enabled === true) !== (cur.enabled === true)) out.enabled = injDraft.enabled === true;
+        if (Number(injDraft.order) !== Number(cur.order)) out.order = Number(injDraft.order);
+        if (Number(injDraft.refreshMs) !== Number(cur.refreshMs)) out.refreshMs = Number(injDraft.refreshMs);
+        if (list(injDraft.presets).join('|') !== (cur.presets || []).join('|')) out.presets = list(injDraft.presets);
+        if (list(injDraft.cwdContains).join('|') !== (cur.cwdContains || []).join('|')) out.cwdContains = list(injDraft.cwdContains);
+        return out;
+      };
+
+      const injDirty = () => Object.keys(injPatch()).length > 0;
+
+      const saveInject = async (patch) => {
+        const body = patch || injPatch();
+        if (!Object.keys(body).length) { flash('没有改动'); return; }
+        setInjBusy(true); setErr(''); setMsg('');
+        try {
+          const r = await jpost('/self-inject', body);
+          setInj(r);
+          const s = r?.settings || {};
+          setInjDraft({
+            enabled: s.enabled === true,
+            order: s.order ?? 10150,
+            refreshMs: s.refreshMs ?? 60000,
+            presets: (s.presets || []).join(', '),
+            cwdContains: (s.cwdContains || []).join(', '),
+          });
+          flash(s.enabled ? '自注入已打开（下一轮就生效）' : '自注入已关闭（下一轮就交回桥接）');
+        } catch (e) {
+          setErr(String(e?.message ?? e));
+        } finally { setInjBusy(false); }
+      };
+
+      const injRow = (label, node, hint) => h('div', { style: { marginBottom: 10 } },
+        h('div', { style: S.label }, label),
+        node,
+        hint ? h('div', { style: S.meta }, hint) : null);
+
+      const renderInject = () => {
+        const cur = inj?.settings || {};
+        const rt = inj?.runtime || null;
+        const on = cur.enabled === true;
+        const lastAt = Number(rt?.last?.at) || 0;
+        const lastText = lastAt ? new Date(lastAt).toLocaleTimeString() : '还没算过';
+        return h('div', null,
+          h('div', { style: S.card },
+            h('h3', { style: S.h3 }, on ? '自注入：开着' : '自注入：关着'),
+            h('div', { style: S.p },
+              on
+                ? '插件自己把记忆块拼到 system prompt 末尾。你每发一条消息刷新一次，同一轮里不管跑多少步都用同一份。'
+                : '现在注入归桥接：桥接每轮自己调 GET /api/dfy-memory/prompt-block 取文本。插件不碰提示词。'),
+            h('div', { style: S.kv },
+              h('div', { style: S.kt }, '当前'),
+              h('div', null, on ? '开' : '关',
+                h('span', { style: S.meta }, '（来源：' + ({ file: '设置页', config: 'cordis.patch.yml', default: '默认值' }[inj?.source] || '…') + '）')),
+              h('div', { style: S.kt }, '设置文件'),
+              h('div', { style: S.code }, inj?.file || '…'),
+              h('div', { style: S.kt }, '已挂载会话'),
+              h('div', null, String((rt?.mounted || []).length) + ' 个',
+                h('span', { style: S.meta }, '（只统计重启后新建的会话）')),
+              h('div', { style: S.kt }, '上次计算'),
+              h('div', null, lastText,
+                h('span', { style: S.meta }, rt?.last?.computes ? ' · 共算了 ' + rt.last.computes + ' 次' : ''))),
+            h('div', { style: { display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' } },
+              h('button', {
+                style: on ? S.btnPrimary : S.btn,
+                disabled: injBusy || on,
+                onClick: () => saveInject({ enabled: true }),
+              }, on ? '已经开着' : '打开自注入'),
+              h('button', {
+                style: on ? S.btn : S.btnPrimary,
+                disabled: injBusy || !on,
+                onClick: () => saveInject({ enabled: false }),
+              }, on ? '关掉（交给桥接）' : '已经关着'))),
+
+          h('div', { style: S.card },
+            h('h3', { style: S.h3 }, '参数'),
+            injRow('插在什么位置（order）',
+              h('input', {
+                type: 'number', style: { ...S.input, flex: '0 0 160px' }, min: 0, max: 20000, step: 10,
+                value: injDraft?.order ?? '',
+                disabled: injBusy,
+                onChange: (ev) => setInjDraft((d) => ({ ...d, order: ev.target.value === '' ? '' : Number(ev.target.value) })),
+              }),
+              '默认 10150：排在 DSH 自带那几段（10000 / 10100 / 10200）后面，这样变的是尾巴，缓存损失最小。'),
+            injRow('兜底刷新间隔（refreshMs）',
+              h('input', {
+                type: 'number', style: { ...S.input, flex: '0 0 160px' }, min: 5000, max: 3600000, step: 5000,
+                value: injDraft?.refreshMs ?? '',
+                disabled: injBusy,
+                onChange: (ev) => setInjDraft((d) => ({ ...d, refreshMs: ev.target.value === '' ? '' : Number(ev.target.value) })),
+              }),
+              '平时按「来新消息」刷新；这个只是在长时间没人说话时兜底（默认 60000 = 1 分钟）。'),
+            injRow('只对这些 preset 生效（presets）',
+              h('input', {
+                style: S.input, spellCheck: false, placeholder: 'qq-chat, qq-chat-v2（留空 = 所有会话）',
+                value: injDraft?.presets ?? '',
+                disabled: injBusy,
+                onChange: (ev) => setInjDraft((d) => ({ ...d, presets: ev.target.value })),
+              }),
+              '逗号分隔。留空 = 所有会话都注入（桌面端也会）。'),
+            injRow('或者按工作目录匹配（cwdContains）',
+              h('input', {
+                style: S.input, spellCheck: false, placeholder: 'qq-bridge（留空 = 不按目录筛）',
+                value: injDraft?.cwdContains ?? '',
+                disabled: injBusy,
+                onChange: (ev) => setInjDraft((d) => ({ ...d, cwdContains: ev.target.value })),
+              }),
+              '会话的工作目录里包含这个字符串就算命中。跟 presets 是「或」的关系。'),
+
+            injDirty() ? h('div', { style: { ...S.warn, marginBottom: 8 } }, '有未保存的改动') : null,
+            h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+              h('button', {
+                style: injDirty() ? S.btnPrimary : S.btn,
+                disabled: injBusy || !injDirty(),
+                onClick: () => saveInject(),
+              }, injBusy ? '保存中…' : '保存'),
+              h('button', { style: S.btn, disabled: injBusy, onClick: loadInject }, '重新读取')),
+            h('div', { style: { ...S.meta, marginTop: 8 } },
+              '开关和 refreshMs 立刻生效；presets / cwdContains 只影响「以后新建的会话」（已经在跑的会话不会重新挂）。')),
+
+          h('div', { style: S.card },
+            h('h3', { style: S.h3 }, '不想要自注入时，别的桥接怎么接'),
+            h('div', { style: S.p },
+              '关掉之后，任何宿主都能用这两种方式拿同一段文本：'),
+            h('div', { style: S.code }, 'GET  http://127.0.0.1:<DSH端口>/api/dfy-memory/prompt-block'),
+            h('div', { style: { ...S.p, marginTop: 8 } },
+              '或者同进程直接调 facade.memory.forPrompt()。三条注意：每轮取一次就够；取不到就降级成空串；别自己再实现一份淡忘逻辑。')));
+      };
+
       const renderAbout = () => h('div', null,
         h('div', { style: S.card },
           h('h3', { style: S.h3 }, '这是什么'),
@@ -578,6 +736,7 @@ if (typeof window === 'undefined' || !window.__ModuleLoader__?.load) {
         h('div', { style: { marginTop: 10 } },
           tab === 'dir' ? renderDir()
             : tab === 'tuning' ? renderTuning()
+              : tab === 'inject' ? renderInject()
               : tab === 'about' ? renderAbout()
                 : renderStatus())
       );

@@ -151,7 +151,14 @@ POST /api/dfy-memory/window/roll    7 天窗口滚动
 
 ## 自注入（默认关）
 
-插件可以**自己**把记忆块挂进 system prompt 末尾，不用宿主帮忙。默认**关闭**——不想要就什么都不用写。
+插件可以**自己**把记忆块挂进 system prompt 末尾，不用宿主帮忙。默认**关闭**。
+
+开/关有两个地方，**设置页优先**：
+
+- **设置 → 大肥鱼记忆 → 注入**（推荐）：一个开关 + 四个参数，**改完下一轮就生效**，不用重启
+- `cordis.patch.yml` 的 `selfInject`：首次部署 / 没有设置文件时的兜底
+
+设置页存到 `<dataRoot>/state/self-inject.json`；优先级：设置文件 > cordis.patch.yml > 默认值。
 
 ```yaml
 # cordis.patch.yml
@@ -167,6 +174,8 @@ POST /api/dfy-memory/window/roll    7 天窗口滚动
 ```
 
 打开之后：
+
+- 开关与 `refreshMs` **立刻生效**；`presets` / `cwdContains` 只影响**以后新建的会话**
 
 - 记忆块进的是 **system prompt**，不是对话历史 —— 所以**压缩（compaction）压不掉它**
 - 刷新节奏跟 QQ 桥接一致：**来一条新消息算一次**，同一轮里不管跑 5 步还是 30 步都用同一份
@@ -242,7 +251,7 @@ GET http://127.0.0.1:<DSH端口>/api/dfy-memory/prompt-block
 ## 自检
 
 ```powershell
-node selfcheck.mjs     # 347 项，全用临时目录，不碰真实数据
+node selfcheck.mjs     # 360 项，全用临时目录，不碰真实数据
 ```
 
 覆盖：路径解析、记忆（写入/判重/召回/分层/touch/恢复原文/渲染/注入文本/生命周期）、
@@ -421,9 +430,19 @@ node selfcheck.mjs     # 347 项，全用临时目录，不碰真实数据
 - `lib/inject-self.js` 抽出刷新策略，可脱离 DSH 单测（会话匹配、快照、标脏重算）
 - 自检 328 → **347** 条
 
+### 0.10.0（2026-11-26）
+
+- **设置页新增「注入」tab**（倒数第二个，在「介绍」前面）：自注入开关 + 位置/刷新间隔/preset/目录匹配，
+  显示「设置文件路径、已挂载几个会话、上次计算时间、累计算了几次」
+- **改成热开关**：开关不再需要重启 DSH —— 设置页改完，下一轮求值就按新设置走（关 → section 返回空串）
+- 设置落在 `<dataRoot>/state/self-inject.json`，优先级 **设置文件 > cordis.patch.yml > 默认值**
+- `wireSelfInject` 移进 `lib/inject-self.js`（`index.js` 只留一层薄导出），新增
+  `normalizeSelfInject / readSelfInjectFile / writeSelfInjectFile / resolveSelfInject`
+- 自检 347 → **360** 条（设置优先级、坏 json、热开关、status）
+
 ## 版本
 
-**0.9.0**（自注入开关，默认关；设置页默认打开）。仓库每个版本一条分支（`0.7.0`、`0.8.0`、`0.8.1`…）加一个同名 tag（`v0.8.1`），
+**0.10.0**（设置页新增「注入」tab；自注入默认关，可热开关）。仓库每个版本一条分支（`0.7.0`、`0.8.0`、`0.8.1`…）加一个同名 tag（`v0.8.1`），
 `git diff v0.8.0 v0.8.1` 就是两版之间的全部差异。发布流程见 `CONTRIBUTING.md`。
 
 ## License
