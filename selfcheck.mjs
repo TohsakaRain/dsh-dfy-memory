@@ -15,6 +15,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { apply, createMemoryFacade, resolvePaths, describePaths, DEFAULT_DATA_ROOT, wireSelfInject } from './index.js';
 import { DEFAULT_SELF_INJECT, createSnapshotProvider, matchesSession, normalizeSelfInject, readSelfInjectFile, resolveSelfInject, writeSelfInjectFile } from './lib/inject-self.js';
+import { SELF_INJECT_PARTS, normalizeParts, diaryLine, promisesLine, timeLine, composeSelfInject } from './lib/inject-parts.js';
 import { recallForPrompt, renderMarkdown } from './lib/memory-store.js';
 import { relateDirs, probeDataRoot, listDir, looksLikeBridgeConfig } from './lib/webapi.mjs';
 import {
@@ -1277,6 +1278,53 @@ console.log('\n[N] 自注入（默认关，设置页可热开关）');
   const st = wired.status();
   ok(st.enabled === true && Array.isArray(st.mounted) && st.mounted.length === 2, 'status() 有开关与已挂载列表（两个会话都注册了，匹配在求值时判）', JSON.stringify({ enabled: st.enabled, mounted: st.mounted.length }));
   ok(st.source === 'file', 'status() 说明来源是设置文件', st.source);
+}
+
+console.log('\n[O] 自注入的内容块（日记/记忆/心情/承诺/时间感）');
+{
+  ok(SELF_INJECT_PARTS.length === 5, '五块：diary/memory/mood/promises/time', SELF_INJECT_PARTS.join(','));
+  ok(normalizeParts([]).length === 5, '空 parts → 全开');
+  ok(normalizeParts(['memory', 'mood']).join(',') === 'memory,mood', '只留选中的');
+  ok(normalizeParts(['memory', 'bogus']).join(',') === 'memory', '不认识的块被丢掉');
+  ok(normalizeParts(['bogus']).length === 5, '全不认识 → 退回全开');
+  ok(normalizeParts('memory,time').length === 2, '支持逗号字符串');
+
+  ok(diaryLine({ todaySections: 2 }) === '【今天日记】已写 2 段', '日记：写过了');
+  ok(diaryLine({ todaySections: 0, lastDate: '2026-11-20' }) === '【今天日记】还没写（上次 2026-11-20）', '日记：没写但有上次');
+  ok(diaryLine({}) === '【今天日记】还没写', '日记：从来没写');
+
+  const fmt = (items) => items.map((x) => '- ' + x.text).join('\n');
+  const pl = promisesLine([{ text: '周末陪他打游戏' }], fmt);
+  ok(pl.includes('【你答应过的事】') && pl.includes('周末陪他打游戏') && pl.includes('兑现不勉强'), '承诺块措辞对');
+  ok(promisesLine([], fmt) === '', '没有承诺 → 空');
+
+  const table = { years: { 2026: { holidays: { '2026-10-01': '国庆节' }, workdays: { '2026-10-10': '国庆调休' } } } };
+  ok(timeLine(Date.parse('2026-10-01T10:00:00+08:00'), table).includes('国庆节·放假'), '时间感：节假日');
+  ok(timeLine(Date.parse('2026-10-10T10:00:00+08:00'), table).includes('国庆调休·调休上班'), '时间感：调休上班');
+  ok(/【时间感】现在 \d{4}-\d{2}-\d{2} 星期./.test(timeLine(Date.parse('2026-11-26T22:05:00+08:00'), null)), '时间感：没数据也能报星期');
+
+  const fakeFacade = {
+    memory: { forPrompt: () => '【你记得的事】\n- 一条记忆' },
+    emotion: { format: () => '【你现在的心情】还行' },
+    promises: { list: () => [{ id: 'p1', text: '陪他吃饭' }], format: fmt },
+    diary: { status: () => ({ todaySections: 1, lastDate: '2026-11-26' }) },
+  };
+  const NOW = Date.parse('2026-11-26T22:05:00+08:00');
+  const all = composeSelfInject({ parts: [], now: NOW, facade: fakeFacade, who: '365845801', holidaysFile: '' });
+  ok(all.includes('【今天日记】已写 1 段'), '全开：日记在');
+  ok(all.includes('【你记得的事】'), '全开：记忆在');
+  ok(all.includes('【你现在的心情】'), '全开：心情在');
+  ok(all.includes('【你答应过的事】'), '全开：承诺在');
+  ok(all.includes('【时间感】'), '全开：时间感在');
+  ok(all.indexOf('【今天日记】') < all.indexOf('【你记得的事】'), '顺序：日记在记忆前面');
+  ok(all.indexOf('【你记得的事】') < all.indexOf('【时间感】'), '顺序：时间感在最后');
+
+  const only = composeSelfInject({ parts: ['memory'], now: NOW, facade: fakeFacade, who: 'x' });
+  ok(only.includes('【你记得的事】') && !only.includes('【时间感】') && !only.includes('【今天日记】'), '只开记忆 → 别的块不出现');
+  const moodOnly = composeSelfInject({ parts: ['mood'], now: NOW, facade: { emotion: { format: () => '' } } });
+  ok(moodOnly === '', '块返回空串 → 整段为空');
+  const broken = composeSelfInject({ parts: ['memory', 'diary'], now: NOW, facade: { memory: { forPrompt: () => '【你记得的事】\n- ok' }, diary: { status: () => { throw new Error('坏了'); } } } });
+  ok(broken.includes('【你记得的事】'), '某块抛错不影响别的块');
 }
 
 console.log(`\n通过 ${pass} / 失败 ${fail}`);
