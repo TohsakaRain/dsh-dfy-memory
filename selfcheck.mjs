@@ -1340,6 +1340,23 @@ console.log('\n[P] memoryDir 的解析（跨机器不能靠写死路径）');
   ok(!/^[A-Za-z]:\\?dfy\\memory$/i.test(def), '兜底不再写死 D:\\dfy\\memory', def);
 }
 
+console.log('\n[Q] 注入里的【我的作品】提示行（跟老桥接对齐）');
+{
+  const wroot = path.join(tmp, 'works-hint');
+  fs.mkdirSync(path.join(wroot, 'works', 'text'), { recursive: true });
+  fs.writeFileSync(path.join(wroot, 'works', 'text', 'a.md'), '# a\n', 'utf8');
+  fs.writeFileSync(path.join(wroot, 'works', 'text', 'b.md'), '# b\n', 'utf8');
+  fs.writeFileSync(path.join(wroot, 'works', 'index.jsonl'), [
+    JSON.stringify({ title: '甲', category: 'text', file: 'a.md', created: '2026-11-01' }),
+    JSON.stringify({ title: '乙', category: 'text', file: 'b.md', created: '2026-11-20' }),
+    JSON.stringify({ title: '幽灵', category: 'text', file: 'gone.md', created: '2026-11-25' }),
+  ].join('\n'), 'utf8');
+  const text = recallForPrompt({ memory: { dir: path.join(wroot, 'memory') }, lifecycle: {} });
+  ok(text.includes('【我的作品】2 件（文字 2 · 图片 0'), '注入里有【我的作品】，且只数磁盘上真有的', (text.split('\n').find((l) => l.includes('【我的作品】')) || '').slice(0, 80));
+  ok(text.includes('最近「乙」'), '最近一件取 created 最新的那个存在的文件');
+  ok(!text.includes('幽灵'), '索引里有、磁盘上没有的不算');
+}
+
 console.log(`\n通过 ${pass} / 失败 ${fail}`);
 fs.rmSync(tmp, { recursive: true, force: true });
 process.exit(fail ? 1 : 0);
