@@ -53,7 +53,7 @@ cd D:\Workspace\dsh-dfy-memory
 git checkout main
 git pull                                   # 先跟上远端
 
-git checkout -b v0.7.0                     # 分支名 = 目标版本号
+git checkout -b 0.8.0                     # 分支名 = 目标版本号，**不带 v**
 ```
 
 ### 2. 在分支上迭代
@@ -63,22 +63,22 @@ git checkout -b v0.7.0                     # 分支名 = 目标版本号
 node selfcheck.mjs                          # 必须全过，条数只增不减（除非改的是断言本身的语义）
 git add -A
 git commit -m "feat(v0.7.0): 做了什么"
-git push -u origin v0.7.0                   # 推分支（可选，但建议推，远端有备份）
+git push -u origin 0.8.0                   # 推分支（建议推，远端就是备份）
 ```
 
 ### 3. 顺手把版本号和三处说明改齐
 
 | 改哪 | 内容 |
 |---|---|
-| `package.json` | `version` 改成 `0.7.0` |
-| `README.md` | 「更新记录」加一节 `### 0.7.0（日期）` |
+| `package.json` | `version` 改成 `0.8.0` |
+| `README.md` | 「更新记录」加一节 `### 0.8.0（日期）` |
 | `selfcheck.mjs` | 新功能的用例 + 工具数量断言 |
 
 ### 4. 验证通过后合回 main
 
 ```bash
 git checkout main
-git merge --no-ff v0.7.0 -m "merge: v0.7.0"
+git merge --no-ff 0.8.0 -m "merge: 0.8.0"
 node selfcheck.mjs                          # 合完再跑一遍
 git push
 ```
@@ -88,16 +88,24 @@ git push
 ### 5. 打 tag
 
 ```bash
-git tag -a v0.7.0 -m "v0.7.0：一句话说明"
-git push origin v0.7.0
+git tag -a v0.8.0 -m "v0.8.0：一句话说明"
+git push origin v0.8.0
 ```
 
-### 6. 删掉已合并的分支
+### 6. 版本分支**留着**（这就是每个版本的记录）
 
 ```bash
-git branch -d v0.7.0
-git push origin --delete v0.7.0             # 远端那份也删
+git branch                                  # 应该能同时看到 0.7.0 / 0.8.0 / main
 ```
+
+每个版本一条分支，以后想看「这一版到底改了什么」：
+
+```bash
+git log main..0.8.0                         # 这一版自己的提交
+git diff v0.7.0 v0.8.0                      # 两版之间的差异
+```
+
+只删临时/试错用的分支，**版本分支不删**。
 
 ## 四、出问题要回滚
 
