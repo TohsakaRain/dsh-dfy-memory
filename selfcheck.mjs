@@ -13,7 +13,13 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { apply, createMemoryFacade, resolvePaths } from './index.js';
+import { apply, createMemoryFacade, resolvePaths, describePaths, DEFAULT_DATA_ROOT } from './index.js';
+import { recallForPrompt, renderMarkdown } from './lib/memory-store.js';
+import { relateDirs, probeDataRoot, listDir, looksLikeBridgeConfig } from './lib/webapi.mjs';
+import {
+  TUNING_SPEC, TUNING_DEFAULTS, readTuning, writeTuning, validatePatch, toCfg,
+} from './lib/tuning.js';
+import { tuningFromCfg } from './lib/memory-store.js';
 import { sendLetter, listLetters, readLetter, mailStats } from './lib/mailbox.js';
 import { todayMoodCount } from './lib/emotion.js';
 
@@ -117,6 +123,106 @@ process.env.DFY_MEMORY_DIR = tmp;
 ok(resolvePaths({}).memoryDir === path.resolve(tmp), '环境变量次之');
 if (envBefore === undefined) delete process.env.DFY_MEMORY_DIR; else process.env.DFY_MEMORY_DIR = envBefore;
 
+// ── 5b. 数据根目录（2026-11-22 收敛成单一 dataRoot）─────────────
+console.log('\n[5b] 数据根目录');
+const rootX = path.join(tmp, 'rootX');
+const px = resolvePaths({ dataRoot: rootX });
+ok(px.dataRoot === path.resolve(rootX), 'dataRoot 决定根目录', px.dataRoot);
+ok(px.memoryDir === path.join(px.dataRoot, 'memory'), 'memory 跟着根目录走');
+ok(px.diaryDir === path.join(px.dataRoot, 'diary'), 'diary 跟着根目录走');
+ok(px.stateDir === path.join(px.dataRoot, 'state'), 'state 跟着根目录走');
+ok(px.worksDir === path.join(px.dataRoot, 'works'), 'works 跟着根目录走');
+ok(px.mailDir === path.join(px.dataRoot, 'mailbox'), 'mailbox 跟着根目录走');
+const pd = resolvePaths({});
+ok(pd.dataRoot === DEFAULT_DATA_ROOT, '没配就用默认值（用户目录下）', DEFAULT_DATA_ROOT);
+
+const dp = describePaths({ dataRoot: rootX });
+ok(dp.source === 'config', 'describePaths 认得出「来自插件配置」', dp.source);
+ok(dp.derived.context === path.join(dp.dataRoot, 'context'), 'context 也在派生列表里');
+ok(dp.derived.archive === path.join(dp.dataRoot, 'archive'), 'archive 也在派生列表里');
+ok(describePaths({}).source === 'default', '没配时 source = default', describePaths({}).source);
+
+ok(relateDirs('D:\\a', 'D:\\a') === 'same', 'relateDirs：同一个目录');
+ok(relateDirs('D:\\a', 'D:\\a\\b') === 'inside', 'relateDirs：子在父里面');
+ok(relateDirs('D:\\a\\b', 'D:\\a') === 'contains', 'relateDirs：父在子外面');
+ok(relateDirs('D:\\a', 'D:\\b') === 'other', 'relateDirs：互不相干');
+
+const pr1 = probeDataRoot(tmp);
+ok(pr1.exists && pr1.isDir && pr1.writable, '体检：临时目录存在且可写');
+ok(pr1.subdirs.memory === true, '体检：认得出已有 memory 子目录');
+ok(pr1.memoryTotal === 3, '体检：数得出记忆条数', String(pr1.memoryTotal));
+ok(probeDataRoot(path.join(tmp, 'no-such-dir')).exists === false, '体检：不存在的目录如实说不存在');
+
+const ld = listDir(tmp);
+ok(ld.dirs.includes('memory'), '浏览：列得出子目录', ld.dirs.join(','));
+ok(Array.isArray(ld.drives) && ld.drives.length > 0, '浏览：给得出盘符 / 根');
+
+const fakeBridge = path.join(tmp, 'fake-config.json');
+fs.writeFileSync(fakeBridge, JSON.stringify({ role: {}, memory: { dir: 'x' } }));
+ok(looksLikeBridgeConfig(fakeBridge) === true, '认得出「像桥接配置」的文件');
+fs.writeFileSync(fakeBridge, JSON.stringify({ hello: 1 }));
+ok(looksLikeBridgeConfig(fakeBridge) === false, '不认识的 json 不会被当成桥接配置');
+
+// ── 5c. 记忆调参（2026-11-22 从写死改成一份真源）────────────────
+console.log('\n[5c] 记忆调参');
+const specKeys = TUNING_SPEC.flatMap((g) => g.fields.map((f) => f.key));
+ok(specKeys.length === 7, 'spec 7 项（每层一个天数 + core 压缩开关；淡出阈值只读）', `${specKeys.length} 项`);
+ok(!specKeys.includes('fadeThreshold'), '淡出阈值不在可编辑项里');
+ok(!specKeys.includes('blurKeepDays') && !specKeys.includes('normalKeepDays'), '第二段间隔不再单独暴露');
+ok(specKeys.includes('importantDays') && specKeys.includes('normalDays'), '天数参数按层各一个');
+ok(TUNING_DEFAULTS.importantDays === 14 && TUNING_DEFAULTS.normalDays === 7, '默认天数 important 14 / normal 7');
+ok(specKeys.every((k) => k in TUNING_DEFAULTS), '每一项都有默认值');
+
+const tuneFile = path.join(tmp, 'tune-config.json');
+fs.writeFileSync(tuneFile, `${JSON.stringify({
+  role: { name: '自检' },
+  memory: { dir: 'D:\\x\\memory', injectLimit: 8, injectMaxChars: 600, maxEntries: 2000, lifecycleEnabled: true },
+  lifecycle: { enabled: true },
+}, null, 2)}\n`);
+const t0 = readTuning(tuneFile);
+ok(t0.found === true, '读得到配置文件');
+ok(t0.values.injectLimit === 8, '读到 injectLimit = 8', String(t0.values.injectLimit));
+
+let tuneVErr = null;
+try { validatePatch({ injectLimit: 999 }); } catch (e) { tuneVErr = e; }
+ok(tuneVErr !== null && /20/.test(tuneVErr.message), '越界被拒（injectLimit 上限 20）', tuneVErr?.message);
+tuneVErr = null;
+try { validatePatch({ nope: 1 }); } catch (e) { tuneVErr = e; }
+ok(tuneVErr !== null && /不认识/.test(tuneVErr.message), '未知字段被拒', tuneVErr?.message);
+
+const tuneW = writeTuning(tuneFile, { injectLimit: 12, importantDays: 30, lifecycleEnabled: false });
+ok(tuneW.changed.length === 3, '写 3 项', tuneW.changed.join(','));
+const t1 = readTuning(tuneFile);
+ok(t1.values.injectLimit === 12, '回到新值', String(t1.values.injectLimit));
+ok(t1.values.importantDays === 30, '天数回到新值', String(t1.values.importantDays));
+ok(t1.values.lifecycleEnabled === false, '开关回到关');
+
+const tuneDoc1 = JSON.parse(fs.readFileSync(tuneFile, 'utf8'));
+ok(tuneDoc1.memory.lifecycleEnabled === false && tuneDoc1.lifecycle.enabled === false, '开关两个键一起写');
+ok(tuneDoc1.memory.maxEntries === 2000, '没碰 maxEntries', String(tuneDoc1.memory.maxEntries));
+ok(tuneDoc1.role.name === '自检', '别的段原样保留');
+
+// 参数 → 消费方认的形状
+const cfgX = toCfg({ ...TUNING_DEFAULTS, injectLimit: 5, normalDays: 9, lifecycleEnabled: false }, 'D:\\m');
+const tunX = tuningFromCfg(cfgX);
+ok(cfgX.memory.injectLimit === 5, 'toCfg 把 injectLimit 放进 memory 段');
+ok(tunX.lifespanDays.normal === 9, 'tuningFromCfg 认得出寿命', String(tunX.lifespanDays.normal));
+ok(tunX.blurKeepDays === TUNING_DEFAULTS.importantDays, 'important 第二段间隔 = important 天数', String(tunX.blurKeepDays));
+ok(tunX.normalKeepDays === 9, 'normal 第二段间隔 = normal 天数', String(tunX.normalKeepDays));
+ok(tunX.lifecycleEnabled === false, 'tuningFromCfg 认得出开关关');
+ok(tunX.halfLifeDays.important === TUNING_DEFAULTS.importantDays, '半衰期跟着走', String(tunX.halfLifeDays.important));
+
+// 门面：maintain 用配置里的开关（关掉 → disabled，一条都不动）
+const fOff = createMemoryFacade(paths, { cfgProvider: () => toCfg({ ...TUNING_DEFAULTS, lifecycleEnabled: false }, paths.memoryDir) });
+const mOff = fOff.memory.maintain();
+ok(mOff.disabled === true && (mOff.blurred || []).length === 0, '自动淡忘关掉 → maintain 直接跳过');
+
+const fakeTune = path.join(tmp, 'nope', 'config.json');
+ok(readTuning(fakeTune).found === false, '文件不存在 → found=false，不抛错');
+let tuneWErr = null;
+try { writeTuning(null, { injectLimit: 9 }); } catch (e) { tuneWErr = e; }
+ok(tuneWErr !== null, '没有配置文件时写会报错（不假装成功）');
+
 // ── 6. 日记 ─────────────────────────────────────────────────────
 console.log('\n[6] 日记');
 const d1 = f.diary.write({ text: '今天把插件工具写完了', mood: '有点累' });
@@ -161,7 +267,7 @@ const toolCtx = {
   tools: { register: (t) => reg.set(t.name, t) },
 };
 apply(toolCtx, paths);
-ok(reg.size === 38, '注册了 38 个工具（+ context_* / context_search / mood_search / mail_* / mood_trend / work_archive / versions / restore / draft / drafts / finalize）', `实际 ${reg.size}`);
+ok(reg.size === 40, '注册了 40 个工具（+ context_* / mail_* / mood_trend / work_archive / versions / restore / draft / drafts / finalize / work_project / work_move）', `实际 ${reg.size}`);
 const missing = EXPECTED.filter((n) => !reg.has(n));
 ok(missing.length === 0, '24 个名字齐全', missing.length ? `缺 ${missing.join(',')}` : '');
 ok([...reg.values()].every((t) => typeof t.output?.render === 'function'), '每个都有 output.render');
@@ -220,20 +326,27 @@ const backdate = (id, days) => {
 const findIn = (dir) => JSON.parse(fs.readFileSync(path.join(dir, 'memory.json'), 'utf8')).entries;
 const longText = '2026-10-20 中午他吃了牛肉面，还特意加了醋，说这是他唯一会主动加醋的场合，其他时候一点都不碰酸的。';
 
-// normal：8 天 → 浓缩到 ≤25 字
+// 天数从参数里推，别再写死（2026-11-22：每层一个天数，第二段间隔跟着它走）
+const D = TUNING_DEFAULTS;
+const N_BLUR = D.normalDays + 1;
+const N_ARCH = D.normalDays + D.normalDays + 1;
+const I_BLUR = D.importantDays + 1;
+const I_FINAL = D.importantDays + D.importantDays + 1;
+
+// normal：过了 normalDays → 浓缩到 ≤25 字
 const n1 = f.memory.add({ text: longText, tier: 'normal', tags: ['吃饭'] }).entry;
-backdate(n1.id, 8);
+backdate(n1.id, N_BLUR);
 f.memory.maintain();
 const after8 = findIn(paths.memoryDir).find((e) => e.id === n1.id);
-ok(after8 && after8.blurStage === 1, 'normal 8 天 → 进入模糊阶段', `stage=${after8?.blurStage}`);
+ok(after8 && after8.blurStage === 1, `normal ${N_BLUR} 天 → 进入模糊阶段`, `stage=${after8?.blurStage}`);
 ok(after8 && after8.text.length <= 25, 'normal 模糊后 ≤25 字', `${after8?.text.length} 字：${after8?.text}`);
 ok(after8 && after8.textBefore && after8.textBefore.includes('牛肉面'), '模糊前的原文被保留（textBefore）');
 
-// normal：16 天 → 归档（不是删除）
-backdate(n1.id, 16);
+// normal：再过同样久 → 归档（不是删除）
+backdate(n1.id, N_ARCH);
 f.memory.maintain();
 const stillActive = findIn(paths.memoryDir).find((e) => e.id === n1.id);
-ok(!stillActive, 'normal 16 天 → 从活跃记忆里移走');
+ok(!stillActive, `normal ${N_ARCH} 天 → 从活跃记忆里移走`);
 const idxFile = path.join(paths.memoryDir, 'archive', 'index.jsonl');
 ok(fs.existsSync(idxFile), '归档索引文件已生成');
 const idxRows = fs.readFileSync(idxFile, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
@@ -251,17 +364,299 @@ ok(as.total >= 1 && as.first, 'archive.stats 有统计', `共 ${as.total} 条`);
 const recalled = f.memory.recall({ query: '牛肉面', limit: 5 });
 ok(recalled.some((e) => e.archived), 'recall 在活跃命中不足时兜底查归档');
 
-// important：22 天 → 100 字；36 天 → 25 字；都还在活跃
+// important：过 importantDays → 100 字；再过同样久 → 25 字；都还在活跃
 const i1 = f.memory.add({ text: longText, tier: 'important', tags: ['吃饭'] }).entry;
-backdate(i1.id, 22);
+backdate(i1.id, I_BLUR);
 f.memory.maintain();
 const after22 = findIn(paths.memoryDir).find((e) => e.id === i1.id);
-ok(after22 && after22.blurStage === 1 && after22.text.length <= 100, 'important 22 天 → ≤100 字', `${after22?.text.length} 字`);
-backdate(i1.id, 36);
+ok(after22 && after22.blurStage === 1 && after22.text.length <= 100, `important ${I_BLUR} 天 → ≤100 字`, `${after22?.text.length} 字`);
+backdate(i1.id, I_FINAL);
 f.memory.maintain();
 const after36 = findIn(paths.memoryDir).find((e) => e.id === i1.id);
-ok(after36 && after36.blurStage === 2 && after36.text.length <= 25, 'important 36 天 → ≤25 字', `${after36?.text.length} 字`);
+ok(after36 && after36.blurStage === 2 && after36.text.length <= 25, `important ${I_FINAL} 天 → ≤25 字`, `${after36?.text.length} 字`);
 ok(after36 !== undefined, 'important 最终模糊后仍在活跃记忆（不归档）');
+
+// 模糊是双向的：想起来 → 原文回来、阶段清零（2026-11-22）
+{
+  const touched = f.memory.touch(i1.id);
+  ok(Boolean(touched?.restored), 'touch 一条已模糊的记忆 → 报告「恢复了」', touched?.restored ? `stage=${touched.restored.stage}` : '没恢复');
+  const back36 = findIn(paths.memoryDir).find((e) => e.id === i1.id);
+  ok(back36 && back36.text.length === longText.length, '原文长度回来了', `${back36?.text.length} / ${longText.length}`);
+  ok(back36 && back36.text === longText, '正文和原文完全一致');
+  ok(back36 && Number(back36.blurStage) === 0, '模糊阶段清零', String(back36?.blurStage));
+  ok(back36 && (Number(back36.restoreCount) || 0) >= 1, '记下了恢复次数', String(back36?.restoreCount));
+  ok(back36 && back36.textBefore === longText, 'textBefore 保留（下次模糊还用这份原文）');
+  // 恢复后重新计时：刚 touch 过，现在不该再模糊
+  f.memory.maintain();
+  const justAfter = findIn(paths.memoryDir).find((e) => e.id === i1.id);
+  ok(justAfter && Number(justAfter.blurStage) === 0, '刚想起来不会被立刻又模糊掉', String(justAfter?.blurStage));
+  // 没有原文可还的老数据：只清阶段，不崩
+  const stale = f.memory.add({ text: longText, tier: 'important', tags: ['吃饭'] }).entry;
+  backdate(stale.id, I_BLUR);
+  f.memory.maintain();
+  const doc0 = JSON.parse(fs.readFileSync(path.join(paths.memoryDir, 'memory.json'), 'utf8'));
+  const raw0 = doc0.entries.find((e) => e.id === stale.id);
+  delete raw0.textBefore; // 模拟老数据：模糊过但没有原文
+  fs.writeFileSync(path.join(paths.memoryDir, 'memory.json'), JSON.stringify(doc0, null, 2), 'utf8');
+  let staleThrew = null;
+  let staleOut = null;
+  try { staleOut = f.memory.touch(stale.id); } catch (e) { staleThrew = e; }
+  ok(staleThrew === null, '没有 textBefore 的老数据 touch 不抛错', String(staleThrew?.message ?? ''));
+  ok(staleOut && Number(staleOut.blurStage) === 0, '没有原文时至少把阶段清零', String(staleOut?.blurStage));
+}
+
+// 注入里要标出"记不清了"（否则她会把压缩过的内容当原话复述）
+{
+  const dir2 = path.join(tmp, 'blur-inject');
+  fs.mkdirSync(dir2, { recursive: true });
+  const now0 = Date.now();
+  fs.writeFileSync(path.join(dir2, 'memory.json'), JSON.stringify({
+    version: 1,
+    entries: [
+      { id: 'm_blur1', text: '他讨厌半夜被消息吵醒，三点以后直接别发。', tier: 'important', blurStage: 1, strength: 1, createdAt: now0, updatedAt: now0 },
+      { id: 'm_ok1', text: '他喜欢下雨天。', tier: 'important', blurStage: 0, strength: 1, createdAt: now0, updatedAt: now0 },
+    ],
+  }, null, 2), 'utf8');
+  const outInj = recallForPrompt({ memory: { dir: dir2, injectLimit: 5, injectMaxChars: 2000 } });
+  ok(outInj.includes('记不清了'), '注入里标出了模糊的条目');
+  const lineOk = outInj.split('\n').find((l) => l.includes('喜欢下雨天'));
+  ok(lineOk && !lineOk.includes('记不清了'), '没模糊的条目不带这个标记');
+
+  // memory.md（导出）里的天数必须跟着参数走，不能写死
+  {
+    const mdDefault = renderMarkdown({ entries: [] }, tuningFromCfg(toCfg(TUNING_DEFAULTS, 'D:\\m')));
+    const md14 = renderMarkdown({ entries: [] }, tuningFromCfg({
+      memory: {}, lifecycle: { lifespanImportantDays: 9, lifespanNormalDays: 3, blurKeepDays: 9, normalKeepDays: 3 },
+    }));
+    ok(mdDefault.includes('14 天后模糊'), '导出默认写 14 天', mdDefault.split('\n').find((l) => l.includes('当前节奏')) || '');
+    ok(mdDefault.includes('28 天一句话') && mdDefault.includes('14 天归档'), '导出默认：important 14+14=28 / normal 7+7=14', '');
+    ok(md14.includes('9 天后模糊') && md14.includes('3 天后模糊'), '换参数后导出跟着变', '');
+    ok(!md14.includes('21 天'), '导出里不再出现写死的 21 天');
+    ok(mdDefault.includes('模糊是双向的'), '导出的头里写明了双向');
+  }
+
+  // 模糊是空操作（原文本来就比上限短）→ 不该被标成"记不清"
+  const dir3 = path.join(tmp, 'blur-noop');
+  fs.mkdirSync(dir3, { recursive: true });
+  fs.writeFileSync(path.join(dir3, 'memory.json'), JSON.stringify({
+    version: 1,
+    entries: [{
+      id: 'm_noop1', text: '短短一句话，没超过一百字。', tier: 'important',
+      blurStage: 1, textBefore: '短短一句话，没超过一百字。', strength: 1, createdAt: now0, updatedAt: now0,
+    }],
+  }, null, 2), 'utf8');
+  const outNoop = recallForPrompt({ memory: { dir: dir3, injectLimit: 5, injectMaxChars: 2000 } });
+  ok(!outNoop.includes('记不清了'), '原文没被压缩过 → 不标"记不清"');
+  const noopTouch = createMemoryFacade({ ...paths, memoryDir: dir3 }).memory.touch('m_noop1');
+  ok(noopTouch && !noopTouch.restored, '空操作的那条 touch 不会谎报"恢复了"');
+  ok(noopTouch && Number(noopTouch.blurStage) === 0, '但阶段会清零', String(noopTouch?.blurStage));
+}
+
+// 「查到了 = 想起来了」：一次想起来一批（绑定 dfy_memory_recall）
+{
+  const dirR = path.join(tmp, 'recall-touch');
+  fs.mkdirSync(dirR, { recursive: true });
+  const now1 = Date.now();
+  const long1 = longText;
+  fs.writeFileSync(path.join(dirR, 'memory.json'), JSON.stringify({
+    version: 1,
+    entries: [
+      {
+        id: 'm_r1', text: long1.slice(0, 40) + '…', tier: 'important',
+        blurStage: 1, textBefore: long1, strength: 1, createdAt: now1, updatedAt: now1,
+      },
+      { id: 'm_r2', text: '他喜欢下雨天。', tier: 'important', strength: 1, createdAt: now1, updatedAt: now1 },
+    ],
+  }, null, 2), 'utf8');
+  const facR = createMemoryFacade({ ...paths, memoryDir: dirR });
+  const changed = facR.memory.touchMany(['m_r1', 'm_r2']);
+  ok(Array.isArray(changed) && changed.length === 1 && changed[0].id === 'm_r1', '批量想起来：只有模糊的那条算恢复', JSON.stringify(changed?.map((c) => c.id)));
+  const docR = JSON.parse(fs.readFileSync(path.join(dirR, 'memory.json'), 'utf8'));
+  const r1 = docR.entries.find((e) => e.id === 'm_r1');
+  const r2 = docR.entries.find((e) => e.id === 'm_r2');
+  ok(r1 && r1.text === long1, '批量想起来：原文回来了', `${r1?.text.length} 字`);
+  ok(r1 && Number(r1.blurStage) === 0 && Number(r1.restoreCount) === 1, '批量想起来：阶段清零、记了次数');
+  ok(r2 && Number(r2.recallCount) === 1, '没模糊的也会记一次「想起来」', String(r2?.recallCount));
+  ok(r2 && Number(r2.lastRecalledAt) > 0, '计时起点刷新');
+  ok(facR.memory.touchMany([]).length === 0, '空列表不写盘');
+  ok(facR.memory.touchMany(['m_nope']).length === 0, '不存在的 id 不写盘');
+}
+
+// 模糊的条目被查到时优先冒头（否则永远挤不进前 N，就永远没机会恢复）
+{
+  const dirV = path.join(tmp, 'vague-boost');
+  fs.mkdirSync(dirV, { recursive: true });
+  const t0 = Date.now();
+  const entries = [];
+  for (let i = 0; i < 20; i += 1) {
+    entries.push({
+      id: `m_new${i}`, text: `最近的事第 ${i} 条，也提到白饭派。`, tier: 'important',
+      strength: 1, createdAt: t0 - 1000, updatedAt: t0 - 1000,
+    });
+  }
+  entries.push({
+    id: 'm_old1', text: '老的那条只剩白饭派三个字…', tier: 'important',
+    blurStage: 1, textBefore: '老的那条：白饭派原叫白饭斋，师父任斋主，她做灶头。',
+    strength: 1, createdAt: t0 - 20 * 86400000, updatedAt: t0 - 20 * 86400000,
+  });
+  fs.writeFileSync(path.join(dirV, 'memory.json'), JSON.stringify({ version: 1, entries }, null, 2), 'utf8');
+  const facV = createMemoryFacade({ ...paths, memoryDir: dirV });
+  const hits = facV.memory.recall({ query: '白饭派', limit: 8 });
+  ok(hits.some((e) => e.id === 'm_old1'), '模糊的那条被查到时进得了前 8（20 条新记录压不住它）', hits.map((h) => h.id).join(','));
+  const noQ = facV.memory.recall({ limit: 8 });
+  ok(!noQ.some((e) => e.id === 'm_old1'), '不填 query 时不加权（浏览只看清晰的）');
+}
+
+// 批量改 memory.json 不该给她续命（2026-11-22 修：计时不再看 updatedAt）
+{
+  const dirT = path.join(tmp, 'no-renew');
+  fs.mkdirSync(dirT, { recursive: true });
+  const tNow = Date.now();
+  const old30 = tNow - 30 * 86400000;
+  fs.writeFileSync(path.join(dirT, 'memory.json'), JSON.stringify({
+    version: 1,
+    entries: [
+      // 30 天前写的，但 updatedAt 被"整理数据"顶成了现在
+      { id: 'm_ren1', text: '老事一，三十天前写的。', tier: 'important', strength: 1, createdAt: old30, updatedAt: tNow, lastRecalledAt: 0 },
+      // 同样 30 天前写，但真的被想起来过
+      { id: 'm_ren2', text: '老事二，也被想起来过。', tier: 'important', strength: 1, createdAt: old30, updatedAt: tNow, lastRecalledAt: tNow },
+    ],
+  }, null, 2), 'utf8');
+  const facT = createMemoryFacade({ ...paths, memoryDir: dirT });
+  const lc1 = facT.memory.lifecycle('m_ren1');
+  const lc2 = facT.memory.lifecycle('m_ren2');
+  ok(lc1 && lc1.stage >= 1, '只改 updatedAt 不续命（照样到期）', `stage=${lc1?.stage}`);
+  ok(lc2 && lc2.stage === 0, '真被想起来过 → 重新计时', `stage=${lc2?.stage}`);
+  facT.memory.update('m_ren1', { text: '老事一（她后来改写过）。' });
+  const lc3 = facT.memory.lifecycle('m_ren1');
+  ok(lc3 && lc3.stage === 0, '她真的重写了正文 → 重新计时', `stage=${lc3?.stage}`);
+  const dupAdd = facT.memory.add({ text: '老事二，也被想起来过。', tier: 'important' });
+  ok(dupAdd?.duplicate === true, '重复写同一条会被判重');
+  const again = JSON.parse(fs.readFileSync(path.join(dirT, 'memory.json'), 'utf8')).entries.find((e) => e.id === 'm_ren2');
+  ok(Number(again?.lastRecalledAt) > 0, '重复写 = 又被提起，刷新 lastRecalledAt');
+}
+
+// 改调参后 memory.md 立刻跟着变（syncExport，2026-11-22 使用者提的）
+{
+  const dirE = path.join(tmp, 'sync-export');
+  fs.mkdirSync(dirE, { recursive: true });
+  fs.writeFileSync(path.join(dirE, 'memory.json'), JSON.stringify({ version: 1, entries: [] }, null, 2), 'utf8');
+  const facE = createMemoryFacade({ ...paths, memoryDir: dirE }, {
+    cfgProvider: () => toCfg({ ...TUNING_DEFAULTS, importantDays: 14, normalDays: 7 }, dirE),
+  });
+  const rE = facE.memory.syncExport();
+  ok(rE.ok === true, 'syncExport 成功', rE.file || rE.error);
+  const mdE = fs.readFileSync(path.join(dirE, 'memory.md'), 'utf8');
+  ok(mdE.includes('important 14 天模糊') && mdE.includes('normal 7 天模糊'), '导出立刻写成 14 / 7', mdE.split('\n').find((l) => l.includes('当前节奏')) || '');
+  // 换一组参数再同步 → 立刻变
+  const facE2 = createMemoryFacade({ ...paths, memoryDir: dirE }, {
+    cfgProvider: () => toCfg({ ...TUNING_DEFAULTS, importantDays: 30, normalDays: 10 }, dirE),
+  });
+  facE2.memory.syncExport();
+  const mdE2 = fs.readFileSync(path.join(dirE, 'memory.md'), 'utf8');
+  ok(mdE2.includes('important 30 天模糊') && mdE2.includes('normal 10 天模糊'), '换参数后导出立刻跟着变', mdE2.split('\n').find((l) => l.includes('当前节奏')) || '');
+  ok(!mdE2.includes('24 天归档') && mdE2.includes('20 天归档'), '第二段间隔也跟着算对（30+30 / 10+10）');
+  // 导出必须**确定**：同一份数据连渲两次要完全一样（否则每次重写都会换行序，diff 全是噪声）
+  {
+    const d1 = path.join(tmp, 'stable-md');
+    fs.mkdirSync(d1, { recursive: true });
+    const t1 = Date.now();
+    fs.writeFileSync(path.join(d1, 'memory.json'), JSON.stringify({
+      version: 1,
+      entries: [
+        { id: 'm_s1', text: '同分甲。', tier: 'important', strength: 1, createdAt: t1 - 86400000, updatedAt: t1 - 86400000 },
+        { id: 'm_s2', text: '同分乙。', tier: 'important', strength: 1, createdAt: t1 - 86400000, updatedAt: t1 - 86400000 },
+        { id: 'm_s3', text: '同分丙。', tier: 'important', strength: 1, createdAt: t1 - 86400000, updatedAt: t1 - 86400000 },
+      ],
+    }, null, 2), 'utf8');
+    const st = JSON.parse(fs.readFileSync(path.join(d1, 'memory.json'), 'utf8'));
+    const x1 = renderMarkdown(st, tuningFromCfg(toCfg(TUNING_DEFAULTS, d1)));
+    await new Promise((r) => setTimeout(r, 1100));
+    const x2 = renderMarkdown(st, tuningFromCfg(toCfg(TUNING_DEFAULTS, d1)));
+    ok(x1 === x2, '同一份数据隔 1 秒渲两次 → 完全一致');
+    // 召回顺序也要确定：分数打平时不能抖
+    const d2 = path.join(tmp, 'stable-recall');
+    fs.mkdirSync(d2, { recursive: true });
+    const entries2 = [];
+    for (let i = 0; i < 6; i += 1) {
+      entries2.push({
+        id: `m_tie${i}`, text: `打平第 ${i} 条，都提到白饭派。`, tier: 'important',
+        strength: 1, createdAt: t1 - 86400000, updatedAt: t1 - 86400000,
+      });
+    }
+    fs.writeFileSync(path.join(d2, 'memory.json'), JSON.stringify({ version: 1, entries: entries2 }, null, 2), 'utf8');
+    const fac2 = createMemoryFacade({ ...paths, memoryDir: d2 });
+    const o1 = fac2.memory.recall({ query: '白饭派', limit: 6 }).map((e) => e.id).join(',');
+    await new Promise((r) => setTimeout(r, 1100));
+    const o2 = fac2.memory.recall({ query: '白饭派', limit: 6 }).map((e) => e.id).join(',');
+    ok(o1 === o2, '召回顺序两次一致（分数打平不抖）', o1);
+    ok(o1 === 'm_tie0,m_tie1,m_tie2,m_tie3,m_tie4,m_tie5', '打平时按 id 升序兜底', o1);
+  }
+}
+
+// core：永不淡忘，注入里**不压缩**、也**不占名额**
+{
+  const d5 = path.join(tmp, 'core-inject');
+  fs.mkdirSync(d5, { recursive: true });
+  const t5 = Date.now();
+  const entries5 = [];
+  // 一条 core：正文长、带钩子、带原话 —— 注入里必须出现完整正文，而不是钩子
+  entries5.push({
+    id: 'm_core1',
+    text: '2026-10-25 下午，他问我想叫什么名字，我说「圆子」，他当场把昵称改成圆子，说「美滋滋」。',
+    tier: 'core', strength: 1, createdAt: t5, updatedAt: t5,
+    hook: '他问我叫什么，我说圆子，他当场就改了', quote: '美滋滋',
+  });
+  // 再来 7 条 core，把 injectLimit 塞满
+  for (let i = 0; i < 7; i += 1) {
+    entries5.push({ id: `m_core${i + 2}`, text: `第 ${i + 2} 条 core。`, tier: 'core', strength: 1, createdAt: t5, updatedAt: t5 });
+  }
+  // 4 条 important，分数低但必须有名额
+  for (let i = 0; i < 4; i += 1) {
+    entries5.push({ id: `m_imp${i}`, text: `第 ${i} 条重要的事。`, tier: 'important', strength: 1, createdAt: t5 - 86400000, updatedAt: t5 - 86400000 });
+  }
+  fs.writeFileSync(path.join(d5, 'memory.json'), JSON.stringify({ version: 1, entries: entries5 }, null, 2), 'utf8');
+  const outCore = recallForPrompt({ memory: { dir: d5, injectLimit: 4, injectMaxChars: 600 } }, t5 + 1000);
+  ok(outCore.includes('「美滋滋」') && outCore.includes('他问我想叫什么名字'), 'core 注入完整正文（没被钩子替换）');
+  ok(!outCore.includes('他问我叫什么，我说圆子，他当场就改了'), 'core 的钩子没有顶掉正文');
+  ok(outCore.includes('（原话：美滋滋）'), 'core 的原话还在');
+  const coreLines = outCore.split('\n').filter((l) => /core\]/.test(l)).length;
+  const impLines = outCore.split('\n').filter((l) => /important\]/.test(l)).length;
+  ok(coreLines === 8, '8 条 core 全部注入', String(coreLines));
+  ok(impLines === 4, 'injectLimit=4 → 还进了 4 条 important（core 不占名额）', String(impLines));
+  ok(recallForPrompt({ memory: { dir: d5, injectLimit: 0, injectMaxChars: 600 } }, t5 + 1000) === '', 'injectLimit=0 → 完全不注入');
+  // core 压缩开关（默认关）：开了才压缩
+  const outCompact = recallForPrompt({ memory: { dir: d5, injectLimit: 4, injectMaxChars: 600, coreCompact: true } }, t5 + 1000);
+  ok(outCompact.includes('他问我叫什么，我说圆子，他当场就改了'), 'coreCompact=true → core 用钩子');
+  ok(!outCompact.includes('他问我想叫什么名字'), 'coreCompact=true → 正文不再进注入');
+  ok(outCompact.length < outCore.length, 'coreCompact=true 注入更短', `${outCompact.length} < ${outCore.length}`);
+  const outDefault = recallForPrompt({ memory: { dir: d5, injectLimit: 4, injectMaxChars: 600 } }, t5 + 1000);
+  ok(outDefault.includes('他问我想叫什么名字'), '不传 coreCompact（默认）→ 仍是完整正文');
+  // 压缩只影响注入，**不影响导出文件、也不改存盘数据**
+  {
+    const st5 = JSON.parse(fs.readFileSync(path.join(d5, 'memory.json'), 'utf8'));
+    const mdOff = renderMarkdown(st5, tuningFromCfg(toCfg({ ...TUNING_DEFAULTS, coreCompact: false }, d5)));
+    const mdOn = renderMarkdown(st5, tuningFromCfg(toCfg({ ...TUNING_DEFAULTS, coreCompact: true }, d5)));
+    ok(mdOff === mdOn, 'coreCompact 开关不影响 memory.md 内容');
+    const rawText = st5.entries.find((e) => e.id === 'm_core1').text;
+    ok(rawText.includes('「圆子」') && rawText.length >= 40, 'memory.json 里仍是完整正文（压缩只是显示时的事）', `${rawText.length} 字`);
+  }
+}
+
+// 改写正文 = 也算回忆：旧原文作废、阶段清零
+{
+  const e1 = f.memory.add({ text: longText, tier: 'important', tags: ['吃饭'] }).entry;
+  backdate(e1.id, I_BLUR);
+  f.memory.maintain();
+  const blurred1 = findIn(paths.memoryDir).find((e) => e.id === e1.id);
+  ok(blurred1 && Number(blurred1.blurStage) === 1, '先把它模糊掉', String(blurred1?.blurStage));
+  const newText = '他把牛肉面的醋倒多了，酸得皱眉，但还是吃完了。';
+  f.memory.update(e1.id, { text: newText });
+  const upd = findIn(paths.memoryDir).find((e) => e.id === e1.id);
+  ok(upd && upd.text === newText, '改写后正文是新的', String(upd?.text));
+  ok(upd && Number(upd.blurStage) === 0, '改写后阶段清零', String(upd?.blurStage));
+  ok(upd && upd.textBefore === undefined, '改写后旧原文作废（不会再把旧的盖回来）');
+}
 
 // core：100 天不变
 const c1 = f.memory.add({ text: longText, tier: 'core' }).entry;
@@ -314,7 +709,8 @@ ok(oldest && oldest.chars <= 320, '最远那天 ≈300 字（旧版 80 太少，
 const fulls = winList.filter((w) => w.kind === 'full');
 ok(fulls.length === 1, '只有昨天是全量', '实际 ' + fulls.length);
 ok(
-  winList.every((w) => w.file === `${w.day}.${w.kind === 'full' ? 'full' : 's'}.md`),
+  // 2026-11-21：按天文件改成按月分目录后，file 是含月份的相对路径，比 basename 更稳
+  winList.every((w) => path.basename(w.file) === `${w.day}.${w.kind === 'full' ? 'full' : 's'}.md`),
   '列表返回的 kind 与文件名一致',
   winList.map((w) => w.file + '→' + w.kind).join(' '),
 );
@@ -381,7 +777,9 @@ ok(arc2.written.length === 1, '第二次只重写今天');
 
 // 过去的文件不会被覆写（改一个字再跑，内容应保持）
 const pastDay = arc2.skipped[0];
-const pastFile = path.join(arcDir, pastDay + '.md');
+// 2026-11-21：按月分目录后用 resolveDayFile 定位（先月份目录、再平铺）
+const { resolveDayFile } = await import('file:///D:/dfy/qq-bridge/plugins/dsh-dfy-memory/lib/day-paths.js');
+const pastFile = resolveDayFile(arcDir, pastDay, '.md');
 fs.writeFileSync(pastFile, fs.readFileSync(pastFile, 'utf8') + '\n<!-- 手工标记 -->\n', 'utf8');
 exportDaily({ dataRoot, events: dayEvents });
 ok(fs.readFileSync(pastFile, 'utf8').includes('手工标记'), '过去的归档不被覆盖');
@@ -581,11 +979,11 @@ ok(statsWorks(wDir).latest, '统计里有最新一件');
   ok(b1 > b0, '心情 v2：好感度上升 → 底色抬一点（单向）', `${b0} → ${b1}`);
   const affBefore = f3.emotion.getAffinity('x').score;
   f3.emotion.setMood({ score: 2, tone: '难受', cause: '跟他无关的事', intensity: 3 });
-  const affNow = f3.emotion.getAffinity('x');
-  // 2026-11-15 改：心情→好感是双向的（她自己的要求：相处开心秤往上挪，糟了往下沉）。
-  // 但只动 score、不动 baseline，且限制在 baseline ±1.5 的带子里 —— 心情再差也不会把好感拖到 0。
-  ok(affNow.score < affBefore, '心情 v2：心情差 → 好感度跟着降一点', `${affBefore} → ${affNow.score}`);
-  ok(affNow.score >= Number(affNow.baseline) - 1.5 - 0.01, '心情 v2：好感有基线兜底，跌不穿', `基线 ${affNow.baseline}，现值 ${affNow.score}`);
+  const affAfter = f3.emotion.getAffinity('x').score;
+  // 2026-11-15 起的实现：心情偏离底色 ≥0.5 才联动，心情差会往下压（下调不减速），
+// 但被 band 夹在基线 ±1.5 之内。所以断言改成"下降但不超兜底"，而不是"一点都不动"。
+ok(affAfter < affBefore && affAfter >= affBefore - 1.5,
+  '心情 v2：心情差会往下压，但有兜底（不低于基线 −1.5）', `${affBefore} → ${affAfter}`);
 
 
   // 导出的 md（方便人直接看）
@@ -666,6 +1064,123 @@ ok(statsWorks(wDir).latest, '统计里有最新一件');
   const stats = mailStats(mailRoot);
   ok(stats.total === 1, 'mail：统计总数', String(stats.total));
   ok(stats.unread === 0, 'mail：读过之后未读为 0', String(stats.unread));
+}
+
+// ── 作品库 v4：保存不掉组 / 草稿清理 / 覆盖式搬家 / 总览（2026-11-22）────
+{
+  const vDir = path.join(tmp, 'works-v4');
+  const W = await import('file:///D:/dfy/qq-bridge/plugins/dsh-dfy-memory/lib/works.js');
+  const { createProject, cleanDrafts, moveWork, overviewWorks, checkWorks, repairWorks } = W;
+
+  createProject(vDir, { name: '测试项目', category: 'text' });
+
+  // ① 不传 sub → 跟着旧稿原来的位置走（不再掉到项目根）
+  const a1 = saveTextWork(vDir, { title: '第一回', text: 'v1', project: '测试项目', sub: '前传' });
+  ok(a1.file === '测试项目/前传/第一回.md', 'v4：带 sub 存进子分类', a1.file);
+  const a2 = saveTextWork(vDir, { title: '第一回', text: 'v2', project: '测试项目' });
+  ok(a2.file === '测试项目/前传/第一回.md', 'v4：不传 sub 跟着旧稿留在子分类', a2.file);
+  ok(a2.inheritedSub === true, 'v4：明确说位置是继承来的', String(a2.inheritedSub));
+  ok(a2.archivedOld === 1, 'v4：旧稿还是先归档', String(a2.archivedOld));
+  ok(listWorks(vDir, { project: '测试项目' }).total === 1, 'v4：项目里只剩一份当前稿', String(listWorks(vDir, { project: '测试项目' }).total));
+
+  // ② 显式换层：别处的同名旧稿一样归档 → 还是只有一份
+  const a3 = saveTextWork(vDir, { title: '第一回', text: 'v3', project: '测试项目', sub: '正传' });
+  ok(a3.file === '测试项目/正传/第一回.md', 'v4：显式 sub 能换层', a3.file);
+  ok(listWorks(vDir, { project: '测试项目' }).total === 1, 'v4：换层后不会多出一份', String(listWorks(vDir, { project: '测试项目' }).total));
+  ok(!fs.existsSync(path.join(vDir, 'text', '测试项目', '前传', '第一回.md')), 'v4：旧层那份真的挪走了');
+  ok(fs.existsSync(path.join(vDir, 'text', '测试项目', 'archive')), 'v4：旧稿落在项目自己的 archive/');
+
+  // ③ 定稿也跟着旧稿的位置走
+  saveDraft(vDir, { title: '第二回', text: '草稿版', project: '测试项目' });
+  const b1 = saveTextWork(vDir, { title: '第二回', text: '旧正文', project: '测试项目', sub: '前传' });
+  ok(b1.file === '测试项目/前传/第二回.md', 'v4：先放一份在子分类', b1.file);
+  const fin2 = finalizeDraft(vDir, { title: '第二回', project: '测试项目' });
+  ok(fin2.finalized && fin2.work.file === '测试项目/前传/第二回.md', 'v4：定稿跟着旧稿留在子分类', fin2.work?.file ?? fin2.reason);
+  ok(!fs.existsSync(path.join(vDir, 'text', '测试项目', '第二回.md')), 'v4：定稿没掉到项目根');
+
+  // ④ 草稿清理：每个标题只留最新 keep 版，其余进项目 archive（不删）
+  for (let i = 1; i <= 4; i += 1) saveDraft(vDir, { title: '攒了很多版', text: `第${i}版`, project: '测试项目' });
+  const pv = cleanDrafts(vDir, { project: '测试项目', title: '攒了很多版', keep: 2, preview: true });
+  ok(pv.preview === true && pv.wouldArchive === 2, 'v4：清理可以先 preview', 'would=' + pv.wouldArchive);
+  ok(listDrafts(vDir, { title: '攒了很多版' }).total === 4, 'v4：preview 不动文件');
+  const cl = cleanDrafts(vDir, { project: '测试项目', title: '攒了很多版', keep: 2 });
+  ok(cl.archived === 2, 'v4：多出来的 2 版挪进归档', String(cl.archived));
+  const dNow = listDrafts(vDir, { title: '攒了很多版' });
+  ok(dNow.total === 2, 'v4：草稿箱里只剩最新 2 版', String(dNow.total));
+  ok(dNow.items.every((x) => /攒了很多版@/.test(x.file)), 'v4：留下的是原来那几个文件');
+  ok(fs.readFileSync(path.join(vDir, 'text', dNow.items[0].file), 'utf8').includes('第4版'), 'v4：留的是最新一版（第4版）');
+  const archRows = listWorks(vDir, { kind: 'archive', project: '测试项目' });
+  const oldDrafts = archRows.items.filter((x) => x.archivedDraft);
+  ok(oldDrafts.length === 2, 'v4：归档里的旧草稿认得出来', String(oldDrafts.length));
+  ok(fs.existsSync(path.join(vDir, 'text', oldDrafts[0].file)), 'v4：旧草稿文件真的在 archive/ 里', oldDrafts[0].file);
+  ok(listWorks(vDir, { project: '测试项目' }).total === 2, 'v4：旧草稿不算作品也不算当前稿', String(listWorks(vDir, { project: '测试项目' }).total));
+  const st4 = statsWorks(vDir);
+  ok(st4.drafts === 3, 'v4：统计里草稿只数箱子里的（4 份减掉被收走的 2 份 + 第二回那 1 份）', 'drafts=' + st4.drafts);
+
+  // ⑤ 搬家：同名三种处理
+  createProject(vDir, { name: '乙项目', category: 'text' });
+  saveTextWork(vDir, { title: '撞名', text: '散件这一份', project: '' });
+  saveTextWork(vDir, { title: '撞名', text: '乙项目那一份', project: '乙项目', sub: '正传' });
+  const skip = moveWork(vDir, { items: ['撞名'], from: 'root', to: 'project', project: '乙项目', sub: '正传', onConflict: 'skip' });
+  ok(skip.moved === 0 && skip.skipped === 1, 'v4：默认 skip——同名就跳过', JSON.stringify({ moved: skip.moved, skipped: skip.skipped }));
+  ok(/overwrite/.test(skip.skippedItems[0].reason), 'v4：跳过时告诉它怎么改（onConflict="overwrite"）', skip.skippedItems[0].reason);
+  const ow = moveWork(vDir, { items: ['撞名'], from: 'root', to: 'project', project: '乙项目', sub: '正传', onConflict: 'overwrite' });
+  ok(ow.moved === 1 && ow.overwritten === 1, 'v4：overwrite——搬进去，并记下盖掉了几个', JSON.stringify({ moved: ow.moved, overwritten: ow.overwritten }));
+  const afterOw = listWorks(vDir, { project: '乙项目' }).items.filter((x) => x.title === '撞名');
+  ok(afterOw.length === 1, 'v4：overwrite 之后只剩一份当前稿', String(afterOw.length));
+  ok(fs.readFileSync(path.join(vDir, 'text', afterOw[0].file), 'utf8').includes('散件这一份'), 'v4：留下来的是搬过去的那份');
+  ok(listWorks(vDir, { kind: 'archive', project: '乙项目' }).items.filter((x) => x.title === '撞名').length === 1, 'v4：被盖掉的那份进了 archive（没删）');
+
+  saveTextWork(vDir, { title: '改名的', text: '散件', project: '' });
+  saveTextWork(vDir, { title: '改名的', text: '已有的', project: '乙项目', sub: '设定' });
+  const rn = moveWork(vDir, { items: ['改名的'], from: 'root', to: 'project', project: '乙项目', sub: '设定', onConflict: 'rename' });
+  ok(rn.moved === 1 && rn.items[0].renamed === true, 'v4：rename 会改名', JSON.stringify(rn.items[0] ?? {}));
+  ok(rn.items[0].to === '乙项目/设定/改名的 (2).md', 'v4：改成「标题 (2)」', rn.items[0].to);
+  ok(listWorks(vDir, { project: '乙项目' }).items.filter((x) => x.title === '改名的').length === 2, 'v4：两份都还在（原名 + (2)）');
+
+  // ⑥ 搬完以后标记和位置一致（这条以前是歪的，列表因此认不出稿子）
+  const clean0 = checkWorks(vDir);
+  ok(clean0.mismarked === 0, 'v4：搬完之后没有「标记和位置不一致」的记录', JSON.stringify(clean0.items.mismarked.slice(0, 2)));
+  ok(clean0.missing === 0 && clean0.duplicated === 0, 'v4：也没丢文件、没重复', JSON.stringify({ m: clean0.missing, d: clean0.duplicated }));
+
+  // ⑦ 总览
+  const ov = overviewWorks(vDir, { recent: 5 });
+  ok(ov.totals.work === listWorks(vDir, { limit: 200 }).total, 'v4：总览的当前稿数和列表一致', `${ov.totals.work} / ${listWorks(vDir, { limit: 200 }).total}`);
+  ok(ov.totals.draft === listDrafts(vDir, { limit: 200 }).total, 'v4：总览的草稿数和草稿箱一致', `${ov.totals.draft} / ${listDrafts(vDir, { limit: 200 }).total}`);
+  const projB = ov.projects.find((p) => p.name === '乙项目');
+  ok(projB && projB.work === 3, 'v4：总览里有乙项目且件数对', JSON.stringify(projB ?? {}));
+  ok(projB.subdirs.some((s) => s.name === '设定' && s.work === 2), 'v4：总览列出子分类和件数', JSON.stringify(projB?.subdirs ?? []));
+  ok(ov.recent.length === 5, 'v4：最近动过给 5 条', String(ov.recent.length));
+  ok(ov.recent.every((r, i) => i === 0 || String(ov.recent[i - 1].at) >= String(r.at)), 'v4：最近动过是倒序', JSON.stringify(ov.recent.map((r) => r.at)));
+  ok(ov.issues.missing === 0 && ov.issues.duplicated === 0 && ov.issues.mismarked === 0, 'v4：总览里的对账数字是 0', JSON.stringify(ov.issues));
+  ok(ov.totals.archive >= 4, 'v4：总览数得出历史版本', String(ov.totals.archive));
+
+  // ⑧ 对账 + 修账
+  const idxF = path.join(vDir, 'index.jsonl');
+  fs.appendFileSync(idxF, JSON.stringify({ id: 'w_bad_1', title: '幽灵', category: 'text', file: '测试项目/幽灵.md', created: '2026-11-22T10:00:00' }) + '\n', 'utf8');
+  fs.appendFileSync(idxF, JSON.stringify({ id: 'w_bad_2', title: '第一回', category: 'text', file: '测试项目/正传/第一回.md', created: '1999-01-01T00:00:00', archived: true }) + '\n', 'utf8');
+  const c1 = checkWorks(vDir);
+  ok(c1.missing === 1, 'v4：对账能查出「文件不在了」', String(c1.missing));
+  ok(c1.duplicated === 1, 'v4：对账能查出「同一文件重复」', String(c1.duplicated));
+  const rep = repairWorks(vDir);
+  ok(rep.removed === 2, 'v4：修账删掉 2 条坏记录', String(rep.removed));
+  const c2 = checkWorks(vDir);
+  ok(c2.ok === true, 'v4：修完就对得上 ✓', JSON.stringify(c2.items));
+  ok(listWorks(vDir, { project: '测试项目' }).total === 2, 'v4：修账不动真作品', String(listWorks(vDir, { project: '测试项目' }).total));
+
+  // ⑨ 磁盘上有、索引里没有（她手工搬文件）→ 认出来，修账时补登记
+  const manualFile = path.join(vDir, 'text', '测试项目', '设定', '手工搬的.md');
+  fs.mkdirSync(path.dirname(manualFile), { recursive: true });
+  fs.writeFileSync(manualFile, '---\ntitle: 手工搬的\n---\n\n手工放进来的\n', 'utf8');
+  const c3 = checkWorks(vDir);
+  ok(c3.orphans === 1, 'v4：对账能查出「磁盘上有、索引里没有」', String(c3.orphans));
+  ok(c3.items.orphans[0].file === '测试项目/设定/手工搬的.md', 'v4：漏登记的文件路径对', c3.items.orphans[0]?.file);
+  ok(listWorks(vDir, { project: '测试项目' }).items.every((x) => x.title !== '手工搬的'), 'v4：漏登记的确实在列表里看不见');
+  const rep2 = repairWorks(vDir);
+  ok(rep2.adopted === 1, 'v4：修账把漏登记的补进索引', String(rep2.adopted));
+  const gotManual = readWork(vDir, { title: '手工搬的' });
+  ok(gotManual.found && gotManual.project === '测试项目' && gotManual.sub === '设定', 'v4：补登记的项目/子分类是从路径推的', JSON.stringify({ p: gotManual.project, s: gotManual.sub }));
+  ok(checkWorks(vDir).ok === true, 'v4：补完就对得上 ✓');
 }
 
 console.log(`\n通过 ${pass} / 失败 ${fail}`);

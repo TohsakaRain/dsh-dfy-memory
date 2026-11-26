@@ -103,7 +103,7 @@ DFY_DATA_DIR=D:\my\dsh-data
 `memory.md` 和 `emotion.md` 是给人看的只读视图——每次写入会顺手同步，
 手改那边不生效（下次写入会被覆盖），要改走工具。
 
-## 38 个工具
+## 40 个工具
 
 | 组 | 工具 | 说明 |
 |---|---|---|
@@ -113,7 +113,7 @@ DFY_DATA_DIR=D:\my\dsh-data
 | **承诺** | `dfy_promise` / `dfy_promises` / `dfy_promise_drop` | 答应的事 + 到点提醒（提醒需要宿主配合） |
 | **对话窗口** | `dfy_context_get` / `dfy_context_list` / `dfy_context_raw` / `dfy_context_search` / `dfy_context_summarize` / `dfy_context_digest` | 按天存的对话：读摘要、读**原始记录**、**跨天全文搜**、自己重写摘要、周/月压缩 |
 | **归档** | `dfy_archive_search` / `dfy_archive_get` / `dfy_archive_stats` | 淡出记忆的索引，想不起旧事时翻 |
-| **作品库** | `dfy_work_save` / `dfy_work_image` / `dfy_works` / `dfy_work_read` | 她写的东西、画的图（`works/`） |
+| **作品库** | `dfy_work_save` / `dfy_work_draft` / `dfy_work_drafts` / `dfy_work_finalize` / `dfy_work_read` / `dfy_work_versions` / `dfy_work_restore` / `dfy_work_archive` / `dfy_work_move` / `dfy_work_project` / `dfy_work_image` / `dfy_works` | 她写的东西、画的图（`works/`）：草稿→定稿、归档/还原、按项目归类、总览与对账 |
 | **邮箱** | `dfy_mail_send` / `dfy_mail_list` / `dfy_mail_read` | 她和执行者之间的信（`mailbox/`，和作品库分开） |
 
 > **注意**：`dfy_promise` 只是**记录**承诺。真正"到点提醒"需要一个定时器去查 `due()` 并把结果喂给模型 ——
@@ -387,6 +387,32 @@ client-modules: <包名> declares dsh.client but exports no "./client" bundle
   - 注入里好感度会带「N 天没动过」
 - 修 `lib/window.js`：D-1/D-2 的守卫读错了形态（`readWindowFile` 不带 only 时先读到 `.full`），会把她写的摘要删掉/覆盖。改成只看 summary 形态，并在删除 `by=agent` 前先备份到 `_replaced/`
 - 自检 169 → 172 条（工具数 36 → 38；「反向不传」那条改成验证基线兜底）
+
+### 0.8.0（2026-11-26）
+
+从运行实例同步回来的一批改动（11-15 → 11-26），大多是「她」用出来、顺手指出的毛病：
+
+- **作品库 v4**（`lib/works.js` 20 KB → 57 KB）：
+  - **草稿归档**：`dfy_work_drafts(action="archive", keep=N, preview=true)` 每个标题只留最新几版，
+    旧的挪进该项目 `archive/`（不删）；先 `preview` 看会动哪些
+  - **保存目标继承**：`dfy_work_save` / `dfy_work_finalize` 不传 `sub` 时**跟着同名旧稿的位置走**，
+    不再掉回项目根（以前会出现「根和「前传」各存了一份」）
+  - **搬运可覆盖**：`dfy_work_move(onConflict="skip" | "overwrite" | "rename")`
+  - **总览与对账**：`dfy_works(kind="overview")` 一眼看项目/子分类/草稿/归档各多少件；
+    `kind="check"` 查索引和磁盘对不上的地方，`repair=true` 顺手修（只存在于磁盘的孤儿文件会被纳入索引）
+  - **位置为准**：`rowKind` 由路径推导，`fixFlags()` 让「草稿/归档」这类陈旧标记跟着磁盘走
+- **记忆不再写日期**：当天的事正文里不标日期（写入时间外面会标），
+  只有**补记**以前的事才在开头写 `YYYY-MM-DD` —— 两个日期不一样的时候才需要区分。
+- **新增 `lib/tuning.js`**：阈值/生命周期/注入限额集中在一处，改节奏只改一个文件。
+- **新增 `lib/day-paths.js`**：按天存档文件的路径解析（宿主侧也用同一份）。
+- **`lib/webapi.mjs` 7.9 KB → 30 KB**：设置页要的状态/路径/维护/归档/窗口滚动接口，
+  并新增只读路由 `GET /api/dfy-memory/prompt-block`：把「长期记忆注入块」交给宿主来取，
+  宿主不必再抄一份 `memory-store`。
+- **设置页（`client.js`）也一起同步了**：8.9 KB → 29.7 KB，标题统一成「大肥鱼记忆」。
+- 自检 172 → **328** 条（工具 38 → 40）。
+
+> 仍然**不同步**的只有一处：`cordis.patch.yml`（实例里写真实盘符路径，这里用默认 `~/.dsh`）。
+> `client.js` 从 0.8.0 起也一起同步——设置页标题两边都叫「大肥鱼记忆」。
 
 ## License
 

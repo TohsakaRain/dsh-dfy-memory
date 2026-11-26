@@ -36,8 +36,8 @@ if (path.resolve(from) === to) {
   process.exit(1);
 }
 
-// client.js **不搬**：设置页标题在实例里是「大肥鱼记忆」，开源版是「AI 记忆」，故意不同
-const files = ['index.js', 'selfcheck.mjs'];
+// client.js 也搬（2026-11-26 起）：开源版设置页标题已改成「大肥鱼记忆」，两边一致，不再有例外
+const files = ['index.js', 'selfcheck.mjs', 'client.js'];
 const libDir = path.join(from, 'lib');
 if (fs.existsSync(libDir)) {
   for (const n of fs.readdirSync(libDir)) {
