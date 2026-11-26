@@ -1,7 +1,7 @@
 # dsh-dfy-memory
 
 > DSH 插件：给一个人格一套**会淡忘**的数据层 —— 长期记忆 / 心情·好感度 / 承诺 / 日记 / 对话窗口 / 作品库 / 邮箱。
-> **40 个 `dfy_*` 工具 + 一个设置页**，纯文件存储，没有数据库。当前版本 **0.8.0**。
+> **40 个 `dfy_*` 工具 + 一个设置页**，纯文件存储，没有数据库。当前版本 **0.8.1**。
 
 ---
 
@@ -154,10 +154,10 @@ POST /api/dfy-memory/window/roll    7 天窗口滚动
 
 ---
 
-## 设置页（默认没开）
+## 设置页
 
-`client.js` 在包里，但 `package.json` **没有声明** `dsh.client`，所以默认不显示。
-想开就加：
+`package.json` 里已经声明了 `dsh.client`，装完重启 DSH，就能在「设置 → 大肥鱼记忆」里看到
+状态、路径、工具开关这些：
 
 ```jsonc
 "dsh": {
@@ -165,15 +165,16 @@ POST /api/dfy-memory/window/roll    7 天窗口滚动
   "client": {
     "platform": "web",
     "inject": [
-      "@deepseek-ai/dsh-client-runtime",
       "@deepseek-ai/dsh-client-ui-settings",
-      "@deepseek-ai/dsh-client-ui-settings-plugins"
+      "@deepseek-ai/dsh-client-ui-settings-general"
     ]
   }
 }
 ```
 
-**`exports` 里必须有 `"./client": "./client.js"`**，否则 DSH 起不来（见下面的坑）。
+不想显示就把整个 `client` 段删掉——工具和数据都不受影响，只是没那个页面。
+
+**`exports` 里必须有 `"./client": "./client.js"`**，否则 DSH 起不来（见下面的坑 3）。
 
 ---
 
@@ -234,7 +235,7 @@ client-modules: <包名> declares dsh.client but exports no "./client" bundle
 
 ## 版本
 
-**0.8.0**。仓库每个版本一条分支（`0.7.0`、`0.8.0`…）加一个同名 tag（`v0.8.0`），
+**0.8.1**（从这版起设置页默认打开）。仓库每个版本一条分支（`0.7.0`、`0.8.0`…）加一个同名 tag（`v0.8.0`），
 `git diff v0.7.0 v0.8.0` 就是两版之间的全部差异。发布流程见 `CONTRIBUTING.md`。
 
 ## License
