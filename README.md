@@ -175,7 +175,7 @@ POST /api/dfy-memory/window/roll    7 天窗口滚动
 
 打开之后：
 
-- 开关与 `refreshMs` **立刻生效**；`presets` / `cwdContains` 只影响**以后新建的会话**
+- 开关、`refreshMs`、`presets` / `cwdContains` 的匹配 —— **全部立刻生效**，改完下一轮就按新规则走
 
 - 记忆块进的是 **system prompt**，不是对话历史 —— 所以**压缩（compaction）压不掉它**
 - 刷新节奏跟 QQ 桥接一致：**来一条新消息算一次**，同一轮里不管跑 5 步还是 30 步都用同一份
@@ -251,7 +251,7 @@ GET http://127.0.0.1:<DSH端口>/api/dfy-memory/prompt-block
 ## 自检
 
 ```powershell
-node selfcheck.mjs     # 360 项，全用临时目录，不碰真实数据
+node selfcheck.mjs     # 362 项，全用临时目录，不碰真实数据
 ```
 
 覆盖：路径解析、记忆（写入/判重/召回/分层/touch/恢复原文/渲染/注入文本/生命周期）、
@@ -440,9 +440,17 @@ node selfcheck.mjs     # 360 项，全用临时目录，不碰真实数据
   `normalizeSelfInject / readSelfInjectFile / writeSelfInjectFile / resolveSelfInject`
 - 自检 347 → **360** 条（设置优先级、坏 json、热开关、status）
 
+### 0.10.1（2026-11-26）
+
+- **自注入的会话匹配改成每次求值时现判**：`presets` / `cwdContains` 也**立刻生效**了
+  （原来只在 `agent/created` 判一次，改匹配要对新会话才生效）
+- 注册时不再按 presets 过滤：section 常驻，不匹配时返回空串 —— 这样
+  「先关着、后来才配上 preset」的会话也能立刻接上
+- 自检 360 → **362**（presets 热生效两条 + 桌面端那条改成"注册了但返回空串"）
+
 ## 版本
 
-**0.10.0**（设置页新增「注入」tab；自注入默认关，可热开关）。仓库每个版本一条分支（`0.7.0`、`0.8.0`、`0.8.1`…）加一个同名 tag（`v0.8.1`），
+**0.10.1**（自注入默认关；设置页「注入」tab 全部参数热生效）。仓库每个版本一条分支（`0.7.0`、`0.8.0`、`0.8.1`…）加一个同名 tag（`v0.8.1`），
 `git diff v0.8.0 v0.8.1` 就是两版之间的全部差异。发布流程见 `CONTRIBUTING.md`。
 
 ## License

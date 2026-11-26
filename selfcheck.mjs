@@ -1258,6 +1258,11 @@ console.log('\n[N] 自注入（默认关，设置页可热开关）');
   writeSelfInjectFile(injFile2, { enabled: true });
   ok(String(sections[0].text()).includes('一条测试记忆'), '再打开 → 又有了');
   ok(typeof agentHandlers['agent/inbox/spliced'] === 'function', '监听了 agent/inbox/spliced（来消息就标脏）');
+  // presets 热生效：已经挂着的会话，改匹配规则立刻按新规则走
+  writeSelfInjectFile(injFile2, { enabled: true, presets: ['别的 preset'] });
+  ok(sections[0].text() === '', 'presets 改成不匹配 → 已挂载的会话立刻不再注入');
+  writeSelfInjectFile(injFile2, { enabled: true, presets: ['qq-chat-v2'] });
+  ok(String(sections[0].text()).includes('一条测试记忆'), 'presets 改回来 → 又注入');
 
   // 不匹配的会话不挂（桌面端）
   const sections2 = [];
@@ -1266,11 +1271,11 @@ console.log('\n[N] 自注入（默认关，设置页可热开关）');
     session: { header: { agentPreset: 'desktop' } },
     ctx: { systemPrompt: { section: (def) => sections2.push(def) }, on: () => () => {}, effect: (fn) => fn() },
   } });
-  ok(sections2.length === 0, 'preset 不匹配的会话不注入（桌面端不受影响）');
+  ok(sections2.length === 1 && sections2[0].text() === '', '不匹配的会话也注册了 section，但返回空串（桌面端不受影响）');
 
   // 状态（设置页要显示的东西）
   const st = wired.status();
-  ok(st.enabled === true && Array.isArray(st.mounted) && st.mounted.length === 1, 'status() 有开关与已挂载列表', JSON.stringify({ enabled: st.enabled, mounted: st.mounted.length }));
+  ok(st.enabled === true && Array.isArray(st.mounted) && st.mounted.length === 2, 'status() 有开关与已挂载列表（两个会话都注册了，匹配在求值时判）', JSON.stringify({ enabled: st.enabled, mounted: st.mounted.length }));
   ok(st.source === 'file', 'status() 说明来源是设置文件', st.source);
 }
 

@@ -673,7 +673,7 @@ if (typeof window === 'undefined' || !window.__ModuleLoader__?.load) {
               }, injBusy ? '保存中…' : '保存'),
               h('button', { style: S.btn, disabled: injBusy, onClick: loadInject }, '重新读取')),
             h('div', { style: { ...S.meta, marginTop: 8 } },
-              '开关和 refreshMs 立刻生效；presets / cwdContains 只影响「以后新建的会话」（已经在跑的会话不会重新挂）。')),
+              '全部立刻生效：开关、refreshMs，以及 presets / cwdContains 的匹配 —— 改完下一轮就按新规则走。')),
 
           h('div', { style: S.card },
             h('h3', { style: S.h3 }, '不想要自注入时，别的桥接怎么接'),
