@@ -341,12 +341,23 @@ const I_FINAL = D.importantDays + D.importantDays + 1;
 
 // normal：过了 normalDays → 浓缩到 ≤25 字
 const n1 = f.memory.add({ text: longText, tier: 'normal', tags: ['吃饭'] }).entry;
+// 关键：只在原文里有的词（回目名 / 细节），模糊之后必须还搜得到 ——
+// 否则「搜不到 → 走不到 restoreClarity → 这条永远没机会变清楚」。
+const n1Real = findIn(paths.memoryDir).find((e) => e.id === n1.id);
+const onlyInText = '碰酸的';   // 只出现在正文末尾，钩子里没有
+ok(!String(n1Real?.hook ?? '').includes(onlyInText), '前提：这个词只在原文里（钩子里没有）', String(n1Real?.hook));
 backdate(n1.id, N_BLUR);
 f.memory.maintain();
 const after8 = findIn(paths.memoryDir).find((e) => e.id === n1.id);
 ok(after8 && after8.blurStage === 1, `normal ${N_BLUR} 天 → 进入模糊阶段`, `stage=${after8?.blurStage}`);
 ok(after8 && after8.text.length <= 25, 'normal 模糊后 ≤25 字', `${after8?.text.length} 字：${after8?.text}`);
 ok(after8 && after8.textBefore && after8.textBefore.includes('牛肉面'), '模糊前的原文被保留（textBefore）');
+// 2026-11-27：模糊 = 换成「一句事实」（hook），不是砍掉后半截
+ok(after8 && after8.text === after8.hook, '模糊后正文 = 钩子（一句事实）', after8?.text);
+// 检索链：gist 里没有、原文里有的词，仍然要能召回（并且带片段）
+const onlyHits = f.memory.recall({ query: onlyInText, limit: 5 });
+ok(onlyHits.some((e) => e.id === n1.id && !e.degraded), '只在原文里的词模糊后仍能召回', onlyInText);
+ok(onlyHits.find((e) => e.id === n1.id)?.snippet?.includes(onlyInText), '召回时带出原文片段', String(onlyHits.find((e) => e.id === n1.id)?.snippet ?? ''));
 
 // normal：再过同样久 → 归档（不是删除）
 backdate(n1.id, N_ARCH);
@@ -363,6 +374,13 @@ const hits = f.archive.search({ query: '牛肉面' });
 ok(hits.length >= 1, 'archive.search 能按关键词命中', `命中 ${hits.length}`);
 const got = f.archive.get([hits[0].id]);
 ok(got.length === 1 && String(got[0].text).includes('牛肉面'), 'archive.get 能打开原文');
+// 2026-11-27：索引行只有 60 字（而且模糊后是 hook，更短），
+// 只在原文里出现的词必须靠「回落月份文件」才搜得到
+const onlyFull = f.archive.search({ query: '碰酸的' });
+ok(onlyFull.length >= 1, '归档：只在原文里的词靠回落月份文件命中', `命中 ${onlyFull.length}`);
+ok(onlyFull[0]?.from === 'full', '归档：命中来源标成 full（不是索引）', String(onlyFull[0]?.from));
+const byTag = f.archive.search({ query: '吃饭' });
+ok(byTag.length >= 1 && byTag[0].from === 'index', '归档：索引里有的词仍然走索引', String(byTag[0]?.from));
 const as = f.archive.stats();
 ok(as.total >= 1 && as.first, 'archive.stats 有统计', `共 ${as.total} 条`);
 
@@ -1431,6 +1449,32 @@ console.log('\n[Q] 注入里的【我的作品】提示行（跟老桥接对齐�
   const text2 = recallForPrompt({ memory: { dir: path.join(wroot, 'memory') }, lifecycle: {} });
   ok(text2.includes('【我的作品】2 件（文字 2 · 图片 0'),
     '注入件数：归档稿和重复索引行都不算', (text2.split('\n').find((l) => l.includes('【我的作品】')) || '').slice(0, 60));
+}
+
+console.log('\n[R] 记忆摘要（模糊 = 一句事实，不是砍尾巴）');
+{
+  const { gistOf } = await import('./lib/memory-store.js');
+  // autoHook 的三种典型形态（之前实测断在半词上的那几条）
+  ok(gistOf({ text: '晚上定下来的事：白饭派改成连载，一天写一回，把当天经历和刷到的东西移花接木写进去。' })
+    === '晚上定下来的事：白饭派改成连载，一天写一回', '长句：在从句边界收（不切半个词）');
+  ok(gistOf({ text: '15:48，白饭派·前传完结了，共 24 回——从 11-07 开工到写完。' })
+    === '15:48，白饭派·前传完结了', '带数字开头的长句：按最后一个从句边界切');
+  ok(gistOf({ text: '他讨厌半夜被消息吵醒。' }) === '他讨厌半夜被消息吵醒。', '短句原样保留（不做空操作）');
+  // 有 hook 就用 hook —— 这才是"摘要由她写"的入口
+  ok(gistOf({ text: '晚上定下来的事：白饭派改成连载，一天写一回，把当天经历和刷到的东西移花接木写进去。', hook: '白饭派改连载，已写完前三回' })
+    === '白饭派改连载，已写完前三回', '有钩子时摘要 = 钩子（不是从正文截）');
+  // 已经是短句的不再被砍
+  ok(gistOf({ text: '他喜欢下雨天。', textBefore: '他喜欢下雨天。' }) === '他喜欢下雨天。', 'textBefore 短就原样用');
+  // 结果永远不超过 24 字（注入预算）
+  const cases = [
+    '一二三四五六七八九十，一二三四五六七八九十，一二三四五六七八九十。',
+    '没有标点的一段很长的文字一直写下去写到超过二十四个字还在继续写',
+    '（特殊）2026-11-19 深夜定的形象设定，永不能忘',
+  ];
+  ok(cases.every((c) => { const g = gistOf({ text: c }); return g.length > 0 && g.length <= 24; }),
+    '任何输入都给出 1~24 字的摘要', cases.map((c) => `${gistOf({ text: c })}(${gistOf({ text: c }).length})`).join(' | '));
+  const oddEnd = cases.filter((c) => /[，、：,（(—]$/.test(gistOf({ text: c })));
+  ok(oddEnd.length === 0, '摘要不以半个标点结尾', oddEnd.join(' | '));
 }
 
 console.log(`\n通过 ${pass} / 失败 ${fail}`);
