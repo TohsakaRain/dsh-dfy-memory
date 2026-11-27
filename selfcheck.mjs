@@ -1514,12 +1514,15 @@ console.log('\n[S] 「这段时间重要」：settle / until（2026-11-27）');
   const DAYs = 24 * 60 * 60 * 1000;
   const lcSettled = sf.memory.lifecycle(w1.id);
   ok(lcSettled.tier === 'normal', 'settle 后生命周期按 normal 算', String(lcSettled.tier));
+  // settle 本身算一次「碰」：刚 settle 完不该马上模糊（哪怕这条 30 天没被提起）
+  ok(sf.memory.lifecycle(w1.id).stage === 0, '刚 settle 完不立刻模糊（settledAt 重置了时钟）', String(sf.memory.lifecycle(w1.id).stage));
   // 直接改文件把这条往前挪 8 天 → 应该进入模糊（normal 7 天）
+  // ⚠️ settledAt 也要挪：它是计时起点里最新的那个（见 lastTouchOf）
   {
     const doc = JSON.parse(fs.readFileSync(path.join(sPaths.memoryDir, 'memory.json'), 'utf8'));
     const e = doc.entries.find((x) => x.id === w1.id);
     const ago = Date.now() - 8 * DAYs;
-    e.createdAt = ago; e.updatedAt = ago; e.lastRecalledAt = ago;
+    e.createdAt = ago; e.updatedAt = ago; e.lastRecalledAt = ago; e.settledAt = ago;
     fs.writeFileSync(path.join(sPaths.memoryDir, 'memory.json'), JSON.stringify(doc, null, 2), 'utf8');
   }
   sf.memory.maintain();
@@ -1592,6 +1595,41 @@ console.log('\n[S2] settle 按 project 回落标签（老记忆没有 project �
   const msg = typeof out === 'string' ? out : String(out?.message ?? '');
   ok(msg.includes('既不是 project 字段、也不是标签'), '对不上的项目名：说清原因', msg.slice(0, 60));
   ok(msg.includes('白饭派'), '并且列出可用标签', msg.slice(0, 120));
+}
+
+console.log('\n[S3] 注入里的 settle 提醒（她怎么知道有这个工具）');
+{
+  const { recallForPrompt } = await import('./lib/memory-store.js');
+  const dir = path.join(tmp, 'mem-settle-hint');
+  fs.mkdirSync(dir, { recursive: true });
+  const hf = createMemoryFacade({ ...paths, memoryDir: dir });
+  const hint = () => String(recallForPrompt({ memory: { dir } }) || '')
+    .split('\n').find((l) => l.includes('dfy_memory_settle')) || '';
+
+  ok(!hint(), '0 条 project 记忆 → 不提醒');
+  hf.memory.add({ text: '白饭派设定一', tier: 'important', project: '白饭派' });
+  ok(!hint(), '只有 1 条 → 不值得提醒一句');
+  hf.memory.add({ text: '白饭派设定二', tier: 'important', project: '白饭派' });
+  const h = hint();
+  ok(h.includes('「白饭派」还有 2 条'), '≥2 条 → 提醒（带项目名和条数）', h.slice(0, 50));
+  ok(h.includes('dfy_memory_settle(project="白饭派")'), '提醒里给出可直接复制的命令');
+
+  hf.memory.settle({ project: '白饭派' });
+  ok(!hint(), 'settle 之后 → 提示消失（不反复催）');
+
+  // core 不参与 settle，不该被算进提醒
+  hf.memory.add({ text: '圆子的核心认知一', tier: 'core', project: '圆子' });
+  hf.memory.add({ text: '圆子的核心认知二', tier: 'core', project: '圆子' });
+  ok(!hint(), '只有 core → 不提醒（core 本来就不参与 settle）');
+
+  // 多个项目时只列前 2 个（别刷屏）
+  for (const p of ['甲', '乙', '丙']) {
+    hf.memory.add({ text: p + '设定一', tier: 'important', project: p });
+    hf.memory.add({ text: p + '设定二', tier: 'important', project: p });
+  }
+  const many = String(recallForPrompt({ memory: { dir } }) || '')
+    .split('\n').filter((l) => l.includes('dfy_memory_settle'));
+  ok(many.length === 2, '多个项目时最多列 2 个', `实际 ${many.length} 行`);
 }
 
 console.log(`\n通过 ${pass} / 失败 ${fail}`);
