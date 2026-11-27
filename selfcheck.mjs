@@ -1552,6 +1552,48 @@ console.log('\n[S] 「这段时间重要」：settle / until（2026-11-27）');
   ok(coreSettled && coreSettled.settledAt === undefined, 'core 从来没被 settle 过');
 }
 
+console.log('\n[S2] settle 按 project 回落标签（老记忆没有 project 字段）');
+{
+  const { createMemoryFacade } = await import('./index.js');
+  const dir = path.join(tmp, 'mem-settle-tag');
+  fs.mkdirSync(dir, { recursive: true });
+  const tf = createMemoryFacade({ ...paths, memoryDir: dir });
+
+  // 模拟 live 的 46 条：**一条 project 字段都没有**，只有 tags
+  const a = tf.memory.add({ text: '白饭派前传师父不喝酒', tier: 'important', tags: ['白饭派'] }).entry;
+  const b = tf.memory.add({ text: '白饭派回目规划', tier: 'important', tags: ['白饭派', '设定'] }).entry;
+  const c = tf.memory.add({ text: '白饭派前传完结', tier: 'core', tags: ['白饭派'] }).entry;
+  const d = tf.memory.add({ text: '他答应周末陪我看海', tier: 'important', tags: ['约定'] }).entry;
+  ok(findIn(dir).every((e) => e.project === undefined), '前提：老记忆没有 project 字段');
+
+  // 实测她 11-28 00:26 撞到的那个问题：project 一条都匹配不上
+  const r = tf.memory.settle({ project: '白饭派' });
+  ok(r.settled === 2, '只按标签也能匹配（core 排除、无关的不动）', `settled=${r.settled}`);
+  ok(tf.memory.tier(a.id) === 'normal' && tf.memory.tier(b.id) === 'normal', '两条 important 都降了');
+  ok(tf.memory.tier(c.id) === 'core', 'core 仍然不动');
+  ok(tf.memory.tier(d.id) === 'important', '别的项目不受影响');
+
+  // 两种来源混着也能一起匹配
+  const e2 = tf.memory.add({ text: '白饭派正传骨架', tier: 'important', project: '白饭派' }).entry;
+  const r2 = tf.memory.settle({ project: '白饭派' });
+  ok(r2.settled === 1 && tf.memory.tier(e2.id) === 'normal', 'project 字段和标签混着都能匹配', `settled=${r2.settled}`);
+
+  // unsettle 同样认两种来源
+  const u = tf.memory.unsettle({ project: '白饭派' });
+  ok(u.unsettled === 3, 'unsettle 也认两种来源', `unsettled=${u.unsettled}`);
+  ok(tf.memory.tier(a.id) === 'important' && tf.memory.tier(e2.id) === 'important', '撤销后都回到 important');
+
+  // 对不上的项目名 → 工具层要说清「为什么没匹配上」+ 列出可用标签
+  const { registerTools } = await import('./index.js');
+  const reg2 = new Map();
+  const ctx2 = { logger: { info: () => {} }, provide: () => {}, tools: { register: (t) => reg2.set(t.name, t) } };
+  registerTools(ctx2, tf, () => {});
+  const out = await reg2.get('dfy_memory_settle').execute({ project: '不存在的作品' });
+  const msg = typeof out === 'string' ? out : String(out?.message ?? '');
+  ok(msg.includes('既不是 project 字段、也不是标签'), '对不上的项目名：说清原因', msg.slice(0, 60));
+  ok(msg.includes('白饭派'), '并且列出可用标签', msg.slice(0, 120));
+}
+
 console.log(`\n通过 ${pass} / 失败 ${fail}`);
 fs.rmSync(tmp, { recursive: true, force: true });
 process.exit(fail ? 1 : 0);

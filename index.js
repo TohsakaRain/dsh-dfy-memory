@@ -539,7 +539,8 @@ export function registerTools(ctx, facade, log = () => {}) {
       + 'action="unsettle" 撤销 —— 这段又开始了。',
     parameters: {
       action: { type: 'string', enum: ['settle', 'unsettle'], description: 'settle（默认）= 降级；unsettle = 撤销' },
-      project: { type: 'string', description: '可选：这个作品/项目的全部记忆（写完了最常用），如 "白饭派"' },
+      project: { type: 'string', description: '可选：这个作品/项目的全部记忆（写完了最常用），如 "白饭派"。\n'
+        + '**同时认两种来源**：记忆上的 project 字段（新记忆），或 tags 里有这个名字的（老记忆都是这种）。' },
       ids: { type: 'array', items: { type: 'string' }, description: '可选：指定几条（dfy_memory_recall 返回的 id）' },
       tags: { type: 'array', items: { type: 'string' }, description: '可选：带这些标签的（任一命中）' },
       query: { type: 'string', description: '可选：正文/钩子关键词（OR）' },
@@ -557,9 +558,28 @@ export function registerTools(ctx, facade, log = () => {}) {
           : f.memory.settle({ ids, project: args.project, tags, query: args.query });
         const n = action === 'unsettle' ? r.unsettled : r.settled;
         if (!n) {
-          return action === 'unsettle'
+          // 一条都没匹配上时，把「为什么没匹配上」说清楚 —— 光说"没找到"她会以为是 bug。
+          // 常见原因：项目名和标签名对不上（老记忆只有 tags）。
+          let why = '';
+          if (args.project) {
+            try {
+              const all = f.memory.recall({ limit: 50 }) || [];
+              const proj = String(args.project).trim();
+              const byField = all.filter((e) => e.project === proj).length;
+              const byTag = all.filter((e) => (e.tags || []).includes(proj)).length;
+              const tagNames = [...new Set(all.flatMap((e) => e.tags || []))];
+              if (!byField && !byTag) {
+                why = `\n\n「${proj}」在记忆里既不是 project 字段、也不是标签。`
+                  + `\n现有标签（挑最贴切的那个）：${tagNames.slice(0, 15).join('、') || '（没有标签）'}`
+                  + '\n也可以直接用 dfy_memory_settle(tags=["…"]) 或 ids=[…]。';
+              } else if (action === 'unsettle' && !all.some((e) => isSettled(e))) {
+                why = '\n\n现在没有任何记忆被 settle 过 —— 不用撤。';
+              }
+            } catch { /* 提示失败不影响主结果 */ }
+          }
+          return (action === 'unsettle'
             ? '这些都没有被 settle 过，不用撤。'
-            : '没找到符合条件的记忆（或已经全 settle 过了，core 不参与）。';
+            : '没找到符合条件的记忆（或已经全 settle 过了，core 不参与）。') + why;
         }
         const head = action === 'unsettle'
           ? `撤销了 ${n} 条（这段又开始了，回到原来的重要度）`
