@@ -410,7 +410,7 @@ export function registerTools(ctx, facade, log = () => {}) {
       who: { type: 'string', description: '和谁有关（QQ 号或昵称）' },
       tags: { type: 'string', description: '标签，逗号分隔，如「约定,游戏」' },
       quote: { type: 'string', description: '可选：当时的**一句原话**（谁说的都行，尽量一字不改）' },
-      hook: { type: 'string', description: '可选：一句话钩子——看到它就能把整件事拉出来（≤30 字）' },
+      hook: { type: 'string', description: '可选，但**建议写**：一句话能把这整件事拉出来（≤24 字）。淡忘之后正文就只剩这一句——写不好以后就想不起来了' },
       refs: { type: 'string', description: '可选：出处，逗号分隔（日期 2026-11-03 / 那天的窗口）' },
     },
     async execute(args) {
@@ -418,8 +418,11 @@ export function registerTools(ctx, facade, log = () => {}) {
       const refs = String(args.refs ?? '').split(/[,，]/).map((s) => s.trim()).filter(Boolean);
       const r = f.memory.add({ text: args.text, tier: args.tier, who: args.who, tags, quote: args.quote, hook: args.hook, refs });
       if (!r?.entry) return '没存成：记忆内容是空的。';
-      if (r.duplicate) return `这条已经记过了（${r.entry.id}），我把它更新了一下。`;
-      return `记住了 ✓ ${r.entry.id} ［${r.entry.tier}］${r.entry.text}`;
+      const warned = !String(args.hook ?? '').trim() && String(args.text ?? '').trim().length > 24
+        ? '\n（没写钩子，淡忘后正文会退化成从开头截的一句——想让它以后还好翻的话，用 dfy_memory_update 补一个 hook）'
+        : '';
+      if (r.duplicate) return `这条已经记过了（${r.entry.id}），我把它更新了一下。${warned}`;
+      return `记住了 ✓ ${r.entry.id} ［${r.entry.tier}］${r.entry.text}${warned}`;
     },
   });
 
@@ -489,7 +492,7 @@ export function registerTools(ctx, facade, log = () => {}) {
       tier: { type: 'string', description: '新的重要程度：core=名字/身份/承诺/约定/大事；important=有情绪有后续、让他改变看法、他反复提的；normal=日常琐事（不确定选这个）' },
       tags: { type: 'string', description: '替换标签，逗号分隔' },
       quote: { type: 'string', description: '可选：换成另一句原话' },
-      hook: { type: 'string', description: '可选：换一个钩子（≤30 字）' },
+      hook: { type: 'string', description: '可选：换一个钩子（≤24 字，淡忘后正文就只剩这一句）' },
       refs: { type: 'string', description: '可选：替换出处，逗号分隔' },
     },
     async execute(args) {
