@@ -263,7 +263,7 @@ GET http://127.0.0.1:<DSH端口>/api/dfy-memory/prompt-block
 ## 自检
 
 ```powershell
-node selfcheck.mjs     # 394 项，全用临时目录，不碰真实数据
+node selfcheck.mjs     # 412 项，全用临时目录，不碰真实数据
 ```
 
 覆盖：路径解析、记忆（写入/判重/召回/分层/touch/恢复原文/渲染/注入文本/生命周期）、
@@ -490,9 +490,38 @@ node selfcheck.mjs     # 394 项，全用临时目录，不碰真实数据
   不传 `parts` 仍然只给记忆（向后兼容）
 - 自检 391 → 394 条
 
+### 0.12.1（2026-11-27）
+
+用了几天撞出来的几处，都是"数字/状态对不上"和"耐久性"：
+
+- **自注入设置页读错了来源**：`/api/dfy-memory/self-inject` 的 GET 写死 `config: {}`，
+  页面显示「默认值（关）」而运行时其实是 `cordis.patch.yml` 里那份（开着）。
+  更糟的是保存时拿这份错快照当基底 —— 只改一下 `refreshMs` 就会把
+  `enabled` / `presets` 悄悄冲回默认值。现在 GET/POST 都带真实的 `config.selfInject`
+  （`hub.selfInjectConfig`），`writeSelfInjectFile` 也支持显式兜底基底。
+- **心情配额被好感联动吃掉**：`changesToday` / `todayMoodCount` 数整个 `history`，
+  而「好感上升顺带抬底色」会往里塞 `source='affinity'` 的记录。实测记 1 次心情 +
+  2 次联动之后，第 3 次 `dfy_mood` 直接被「今天已经 3 次」拒掉；「今天还没记过」
+  的提醒也因此不出现。现在只数她自己记的那些。
+- **注入里的【我的作品】件数虚高**：直接数 `index.jsonl` 行数，而索引是 append-only 的
+  —— 归档、草稿、重复索引行都算进去（3 件当前稿能报成 5、6 件）。
+  现在和 `dfy_works` 用同一套判据：同一文件只算一条、只算当前稿、磁盘上真有的才算。
+- **邮箱 `readLetter` 路径穿越**：`id` 未校验就拼进路径，传 `../../x` 能读到
+  邮箱外的文件并把它改写成 `read: true`。现在只允许单段文件名。
+- **作品库索引的耐久性**：`readIndex` 把解析不了的行记下来、`rewriteIndex` 原样补回
+  （以前第一次「改别的条目」就会把坏行永久抹掉）；`promote` / `restoreWork`
+  写新稿失败时回滚刚归档的旧稿；`moveWork` 的 `uniqueNameIn` 移进 per-item try
+  （异常会冲出整个函数，已搬条目来不及落盘 → 全变 missing + 孤儿），
+  并且 overwrite 分支改的 `seat.file` 也会落盘。
+- **`memory.stats()` 补 `fading` 数组**：消费方读的是它，之前只有 `faded` 计数
+  ⇒「快淡掉的」那行永远是空的。
+- 自注入承诺块里的 `qq_promise_drop` 改成 `dfy_promise_drop`。
+- 自检 **394 → 412** 条；`selfcheck.mjs` 不再从硬编码的 `D:/dfy/...` 实例路径导入
+  （以前仓库里的修改验不到）。
+
 ## 版本
 
-**0.12.0**（注入块与老桥接逐字等价；prompt-block 可一次取整块）。仓库每个版本一条分支（`0.7.0`、`0.8.0`、`0.8.1`…）加一个同名 tag（`v0.8.1`），
+**0.12.1**（注入/心情/作品库几处数字对不上的修正；自检 412 条）。仓库每个版本一条分支（`0.7.0`、`0.8.0`、`0.8.1`…）加一个同名 tag（`v0.8.1`），
 `git diff v0.8.0 v0.8.1` 就是两版之间的全部差异。发布流程见 `CONTRIBUTING.md`。
 
 ## License

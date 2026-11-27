@@ -1629,6 +1629,9 @@ export function apply(ctx, config = {}) {
         saveTuning: (patch) => writeTuning(bridgeConfig, patch),
         // 自注入：设置页「注入」tab 读写（设置文件优先于 cordis.patch.yml）
         selfInject: () => selfInjectWire,
+        // 设置页读写设置文件时的兜底基底（= cordis.patch.yml 的 selfInject），
+        // 不能写死 {}：否则页面显示的和运行时生效的不是同一份
+        selfInjectConfig: config?.selfInject ?? {},
       };
       const register = () => ctx.webServer.register({
         kind: 'prefix',

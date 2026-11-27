@@ -7,6 +7,7 @@
 #
 # 它**不往任何 prompt 里注入东西**：注入是宿主的事，宿主通过
 #   GET /api/dfy-memory/prompt-block  或  facade.memory.forPrompt()  拿文本。
+# （可选的自注入默认关；打开后由插件自己拼，见下面 selfInject）
 #
 # 数据默认在 ~/.dsh/dsh-dfy-memory/（memory/ diary/ state/ works/ mailbox/ context/ archive/）
 # ============================================================================

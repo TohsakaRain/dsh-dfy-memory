@@ -68,6 +68,10 @@ ok(hit.length === 1, '按关键词召回', `命中 ${hit.length} 条`);
 
 const st = f.memory.stats();
 ok(st.total === 3, '统计总数 = 3（判重那条没新增）', `total=${st.total}`);
+// stats 必须给出 `fading` 数组（消费方 dfy_memory_stats / 设置页读的是它，不是 faded 计数）
+ok(Array.isArray(st.fading), 'stats 返回 fading 数组（不是 undefined）', `typeof=${typeof st.fading}`);
+ok(typeof st.faded === 'number' && st.faded === st.fading.length, 'faded 计数 = fading 数组长度', `faded=${st.faded} len=${st.fading.length}`);
+ok(st.mostForgotten === null || st.mostForgotten?.id === st.fading[0]?.id, 'mostForgotten = fading 里最久的那条', `${st.mostForgotten?.id ?? 'null'}`);
 
 const core = f.memory.recall({ tier: 'core' });
 ok(core.length === 1 && core[0].tier === 'core', '按层筛选 core');
@@ -683,9 +687,7 @@ ok(f.memory.blur('一二三四五六七八九十十一十二', 10).length <= 11,
 
 // ── 9. 7 天窗口 ─────────────────────────────────────────────────
 console.log('\n[9] 7 天窗口');
-const { rollWindow, listWindow, readWindowFile, writeWindowFile, summarizeDay, truncateForBudget } = await import(
-  'file:///D:/dfy/qq-bridge/plugins/dsh-dfy-memory/lib/window.js'
-);
+const { rollWindow, listWindow, readWindowFile, writeWindowFile, summarizeDay, truncateForBudget } = await import('./lib/window.js');
 const ctxDir = path.join(tmp, 'context');
 const DAYMS = 24 * 60 * 60 * 1000;
 const nowMs = Date.now();
@@ -756,9 +758,7 @@ ok(truncateForBudget('很长的一段话，'.repeat(20), 20).length <= 21, 'trun
 
 // ── 10. 按天归档（只写不改）────────────────────────────────────
 console.log('\n[10] 按天归档');
-const { exportDaily, archiveLogStats } = await import(
-  'file:///D:/dfy/qq-bridge/plugins/dsh-dfy-memory/lib/daily-archive.js'
-);
+const { exportDaily, archiveLogStats } = await import('./lib/daily-archive.js');
 const dataRoot = path.join(tmp, 'dataroot');
 const dayEvents = [];
 for (let d = 2; d >= 0; d--) {
@@ -780,7 +780,7 @@ ok(arc2.written.length === 1, '第二次只重写今天');
 // 过去的文件不会被覆写（改一个字再跑，内容应保持）
 const pastDay = arc2.skipped[0];
 // 2026-11-21：按月分目录后用 resolveDayFile 定位（先月份目录、再平铺）
-const { resolveDayFile } = await import('file:///D:/dfy/qq-bridge/plugins/dsh-dfy-memory/lib/day-paths.js');
+const { resolveDayFile } = await import('./lib/day-paths.js');
 const pastFile = resolveDayFile(arcDir, pastDay, '.md');
 fs.writeFileSync(pastFile, fs.readFileSync(pastFile, 'utf8') + '\n<!-- 手工标记 -->\n', 'utf8');
 exportDaily({ dataRoot, events: dayEvents });
@@ -793,8 +793,9 @@ ok(arcSt.days === 3 && arcSt.first && arcSt.last, 'archiveLogStats 统计正确'
 console.log('\n[11] 作品库');
 const {
   worksDirOf, saveTextWork, saveImageWork, listWorks, readWork, statsWorks, worksHint, sanitizeTitle,
-} = await import('file:///D:/dfy/qq-bridge/plugins/dsh-dfy-memory/lib/works.js');
-const { listVersions, archiveWork, restoreWork, saveDraft, listDrafts, readDraft, finalizeDraft } = await import('file:///D:/dfy/qq-bridge/plugins/dsh-dfy-memory/lib/works.js');
+  moveWork, createProject,
+} = await import('./lib/works.js');
+const { listVersions, archiveWork, restoreWork, saveDraft, listDrafts, readDraft, finalizeDraft } = await import('./lib/works.js');
 
 ok(sanitizeTitle('a/b:c*d?') === 'a_b_c_d_', '非法字符被替换');
 ok(sanitizeTitle('  ') === 'untitled', '空标题回退 untitled');
@@ -1039,6 +1040,37 @@ ok(affAfter < affBefore && affAfter >= affBefore - 1.5,
   ok(todayMoodCount(fM.emotion.load()) === 1, '记心情：今日计数正确', String(todayMoodCount(fM.emotion.load())));
 }
 
+// ── 心情配额不被好感联动吃掉（2026-11-27 实测：记 1 次 + 2 次联动 → 第 3 次被拒）──
+{
+  const stateQ = path.join(tmp, 'state-quota');
+  const fQ = createMemoryFacade({ ...paths, stateDir: stateQ });
+  fs.mkdirSync(stateQ, { recursive: true });
+  fQ.emotion.setAffinity({ who: 'x', score: 5, note: '起手' });
+
+  const r1 = fQ.emotion.setMood({ score: 8, tone: '好', cause: '一', intensity: 3 });
+  ok(!r1.rejected && r1.changes === 1, '心情配额：第 1 次记数正确（联动记录不算）', JSON.stringify({ changes: r1.changes }));
+
+  // 好感度上升两次：每次都会往 history 里塞一条 source='affinity'
+  fQ.emotion.setAffinity({ who: 'x', score: 7, note: '二' });
+  fQ.emotion.setAffinity({ who: 'x', score: 8, note: '三' });
+  ok(fQ.emotion.load().history.filter((h) => h.source === 'affinity').length === 2, '心情配额：好感联动确实写进了 history');
+
+  const r2 = fQ.emotion.setMood({ score: 8, tone: '好2', cause: '二', intensity: 3 });
+  ok(!r2.rejected && r2.changes === 2, '心情配额：记 2 次仍然算 2（没被联动记录顶上去）', JSON.stringify({ rejected: r2.rejected, changes: r2.changes }));
+  const r3 = fQ.emotion.setMood({ score: 8, tone: '好3', cause: '三', intensity: 3 });
+  ok(!r3.rejected && r3.changes === 3, '心情配额：第 3 次还能记', JSON.stringify({ rejected: r3.rejected, changes: r3.changes }));
+  const r4 = fQ.emotion.setMood({ score: 8, tone: '好4', cause: '四', intensity: 3 });
+  ok(r4.rejected === 'freq', '心情配额：第 4 次才被拒（一天三次仍然生效）', String(r4.rejected));
+
+  // 提醒也别被联动记录骗成「今天记过」
+  const stateQ2 = path.join(tmp, 'state-quota2');
+  const fQ2 = createMemoryFacade({ ...paths, stateDir: stateQ2 });
+  fs.mkdirSync(stateQ2, { recursive: true });
+  fQ2.emotion.setAffinity({ who: 'y', score: 7, note: '抬一点' });
+  ok(todayMoodCount(fQ2.emotion.load()) === 0, '心情配额：只有联动记录时，今天计数仍是 0');
+  ok(/记一笔/.test(fQ2.emotion.format({ who: 'y' })), '心情配额：只有联动记录时仍然提醒「记一笔」');
+}
+
 // ── 邮箱（2026-11-06） ────────────────────────────────────────────────
 {
   const mailRoot = path.join(tmp, 'mailbox');
@@ -1066,12 +1098,19 @@ ok(affAfter < affBefore && affAfter >= affBefore - 1.5,
   const stats = mailStats(mailRoot);
   ok(stats.total === 1, 'mail：统计总数', String(stats.total));
   ok(stats.unread === 0, 'mail：读过之后未读为 0', String(stats.unread));
+
+  // 路径穿越：id 直接拼文件名，必须锁死（2026-11-27 实测过能读邮箱外的文件）
+  const outside = path.join(tmp, 'mail-outside.md');
+  fs.writeFileSync(outside, '---\nid: x\nread: false\n---\n外面的文件\n', 'utf8');
+  ok(readLetter(mailRoot, '../../mail-outside') === null, 'mail：id 里的 ../ 被挡住');
+  ok(/read: false/.test(fs.readFileSync(outside, 'utf8')), 'mail：邮箱外的文件没被改');
+  ok(readLetter(mailRoot, '') === null && readLetter(mailRoot, '..') === null, 'mail：空 id / .. 直接返回 null');
 }
 
 // ── 作品库 v4：保存不掉组 / 草稿清理 / 覆盖式搬家 / 总览（2026-11-22）────
 {
   const vDir = path.join(tmp, 'works-v4');
-  const W = await import('file:///D:/dfy/qq-bridge/plugins/dsh-dfy-memory/lib/works.js');
+  const W = await import('./lib/works.js');
   const { createProject, cleanDrafts, moveWork, overviewWorks, checkWorks, repairWorks } = W;
 
   createProject(vDir, { name: '测试项目', category: 'text' });
@@ -1183,6 +1222,23 @@ ok(affAfter < affBefore && affAfter >= affBefore - 1.5,
   const gotManual = readWork(vDir, { title: '手工搬的' });
   ok(gotManual.found && gotManual.project === '测试项目' && gotManual.sub === '设定', 'v4：补登记的项目/子分类是从路径推的', JSON.stringify({ p: gotManual.project, s: gotManual.sub }));
   ok(checkWorks(vDir).ok === true, 'v4：补完就对得上 ✓');
+
+  // ⑩ 索引里的坏行（半截 JSON / 被打断的 append）不该被"改别的条目"顺手抹掉。
+  // 用独立 tmp 目录，不碰上面的 vDir。
+  {
+    const bDir = path.join(tmp, 'works-badline');
+    fs.mkdirSync(bDir, { recursive: true });
+    const idxF2 = path.join(bDir, 'index.jsonl');
+    const BAD = '{"id":"w_half","title":"半截';   // 解析不了的一行
+    saveTextWork(bDir, { title: '垫底用的', text: '随便写点', project: '测试项目' });
+    fs.appendFileSync(idxF2, BAD + '\n', 'utf8');
+    // 触发一次「读-改-写」：搬一件作品（会 readIndex → 改 rows → rewriteIndex）
+    moveWork(bDir, { items: ['垫底用的'], from: 'project', to: 'root', project: '测试项目' });
+    const after = fs.readFileSync(idxF2, 'utf8');
+    ok(after.includes(BAD), '索引坏行在改动后仍然保留（不被幸存行覆盖抹掉）', `含坏行=${after.includes(BAD)}`);
+    // 坏行不该把好行带崩：正常作品仍读得到
+    ok(listWorks(bDir, {}).total >= 1, '坏行存在时正常作品仍可列出', String(listWorks(bDir, {}).total));
+  }
 }
 
 console.log('\n[N] 自注入（默认关，设置页可热开关）');
@@ -1218,6 +1274,14 @@ console.log('\n[N] 自注入（默认关，设置页可热开关）');
   ok(readSelfInjectFile(injFile).settings.enabled === false, '再写成关');
   fs.writeFileSync(injFile, '{ 坏 json', 'utf8');
   ok(readSelfInjectFile(injFile).ok === false, '坏 json → 当没有设置文件');
+
+  // 设置页只改一个字段时：文件还没建，基底必须是 config 里那份（不能冲回默认）
+  const injFile3 = path.join(injDir, 'merge-from-config.json');
+  const cfgOn = { enabled: true, presets: ['qq-chat'] };
+  const merged = writeSelfInjectFile(injFile3, { refreshMs: 45000 }, cfgOn);
+  ok(merged.enabled === true && merged.presets[0] === 'qq-chat' && merged.refreshMs === 45000,
+    '设置页改 refreshMs 不会把 config 里的 enabled/presets 冲掉', JSON.stringify(merged));
+  ok(resolveSelfInject({ file: injFile3, config: cfgOn }).settings.enabled === true, '合并后读回来仍是开的');
 
   // 快照：同一轮里不重复算
   let builds = 0;
@@ -1355,6 +1419,18 @@ console.log('\n[Q] 注入里的【我的作品】提示行（跟老桥接对齐�
   ok(text.includes('【我的作品】2 件（文字 2 · 图片 0'), '注入里有【我的作品】，且只数磁盘上真有的', (text.split('\n').find((l) => l.includes('【我的作品】')) || '').slice(0, 80));
   ok(text.includes('最近「乙」'), '最近一件取 created 最新的那个存在的文件');
   ok(!text.includes('幽灵'), '索引里有、磁盘上没有的不算');
+
+  // 归档 / 草稿 / 重复索引行都不该算进「件数」——注入里的数要和 dfy_works 一致
+  fs.mkdirSync(path.join(wroot, 'works', 'text', 'archive'), { recursive: true });
+  fs.writeFileSync(path.join(wroot, 'works', 'text', 'archive', 'a@20261110-1010.md'), '# a old\n', 'utf8');
+  const idxF = path.join(wroot, 'works', 'index.jsonl');
+  fs.appendFileSync(idxF, [
+    JSON.stringify({ title: '甲', category: 'text', file: 'archive/a@20261110-1010.md', created: '2026-11-10', archived: true }),
+    JSON.stringify({ title: '甲', category: 'text', file: 'a.md', created: '2026-11-01' }),   // 重复索引行
+  ].join('\n') + '\n', 'utf8');
+  const text2 = recallForPrompt({ memory: { dir: path.join(wroot, 'memory') }, lifecycle: {} });
+  ok(text2.includes('【我的作品】2 件（文字 2 · 图片 0'),
+    '注入件数：归档稿和重复索引行都不算', (text2.split('\n').find((l) => l.includes('【我的作品】')) || '').slice(0, 60));
 }
 
 console.log(`\n通过 ${pass} / 失败 ${fail}`);
