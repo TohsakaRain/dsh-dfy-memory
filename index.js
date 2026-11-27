@@ -692,10 +692,15 @@ export function registerTools(ctx, facade, log = () => {}) {
 
   tool({
     name: 'dfy_context_summarize',
-    description: '把某一天的对话压成摘要并保存（覆盖自动生成的那份）。写日记时顺手做一次，比你以后翻原文省事。',
+    description: '把某一天的对话压成摘要并保存（覆盖自动生成的那份）。写日记时顺手做一次，比你以后翻原文省事。\n'
+      + '⚠️ **这是纪要，不是第二份日记**——两者分工：\n'
+      + '  · 日记（dfy_diary_write）：第一人称，写感受、当时的想法、细节。日记里可以有「我」和情绪。\n'
+      + '  · 摘要（这个）：第三人称，只记**事实**——谁说了什么、定了什么、答应了什么、改了什么。\n'
+      + '别把评价写进摘要（「那是他说话不算数的毛病」），评价会过期，而且以后查的时候分不清哪句是事实。\n'
+      + '原始聊天记录在 archive/chat-logs/ 里，摘要只是索引；细节不确定就留空回去翻原文，别猜。',
     parameters: {
       day: { type: 'string', description: '日期 YYYY-MM-DD（一般是昨天）' },
-      text: { type: 'string', description: '摘要正文（不会被 1200 字硬砍；建议含 1~2 句原话，用「」括起来）' },
+      text: { type: 'string', description: '摘要正文（≤1200 字建议）。第三人称、只写事实。建议含 1~2 句原话，用「」括起来' },
       force: { type: 'boolean', description: '没有原话也硬存（默认不存，会退回来让你补）' },
     },
     async execute(args = {}) {
@@ -717,11 +722,22 @@ export function registerTools(ctx, facade, log = () => {}) {
         if (!fs.existsSync(rawPath)) return `窗口里没有 ${day}，归档里也没有那天的原始记录——没东西可压。`;
       }
       const r = f.window.summarize(day, text);
+      // 软提醒（不拦）：摘要该是第三人称的纪要，不是第二份日记。
+      // 只提醒不改写——她的稿子是她写的，机器不替她动笔。
+      const povWarn = (() => {
+        const first = (text.match(/我/g) || []).length;
+        const per = (text.match(/[他她]/g) || []).length;
+        if (first >= 3 && first > per * 0.5) {
+          return '\n\n（提醒：这篇里「我」出现了 ' + first + ' 次，读起来更像日记。摘要是纪要——第三人称、只记事实，'
+            + '感受留给日记。已按原样存下，不替你改。）';
+        }
+        return '';
+      })();
       const todo = pendingDigestDays(f.paths.memoryDir).filter((d) => d !== day);
       const nextLine = todo.length
         ? '\n下一天：' + todo[0] + '（还剩 ' + todo.length + ' 天）——要不要现在接着读？'
         : '\n全部重摘完了 ✓';
-      return '压好了 ✓ ' + r.day + ' 摘要 ' + r.chars + ' 字（覆盖了原来的自动摘要）' + (r.truncated ? '。⚠️ ' + r.note : '') + nextLine;
+      return '压好了 ✓ ' + r.day + ' 摘要 ' + r.chars + ' 字（覆盖了原来的自动摘要）' + (r.truncated ? '。⚠️ ' + r.note : '') + nextLine + povWarn;
     },
   });
 
