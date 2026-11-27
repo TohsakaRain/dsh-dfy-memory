@@ -15,9 +15,11 @@ const asJson = process.argv.includes('--json');
 
 /** 评价性/主观词——这些出现在摘要里，查的时候分不清哪句是事实。 */
 const JUDGE_WORDS = [
-  '那是他的', '毛病', '活该', '不值得', '太差', '过分', '恶心', '讨厌',
+  '那是他的', '活该', '不值得', '太差', '过分', '恶心', '讨厌',
   '我觉得他', '他就是', '他根本', '他从来', '反正他', '不像话',
 ];
+/** 否定/引用用法：「没毛病」「没问题的」是夸，不是评价 —— 先剔掉再查。 */
+const NEGATED = /没毛病|没问题|没意见|不算毛病|不是毛病/g;
 /** 明显的日记句式（第一人称 + 情绪）。 */
 const DIARY_RE = /(我(心里|觉得|怕|想|难受|高兴|有点|终于)|让我|我说|我说了)/;
 
@@ -41,7 +43,9 @@ for (const abs of walk(ROOT).sort()) {
 
   const me = (body.match(/我/g) || []).length;
   const other = (body.match(/[他她你]/g) || []).length;
-  const judge = JUDGE_WORDS.filter((w) => body.includes(w));
+  // 先剔掉「没毛病」这类否定用法，再看评价词
+  const judgeText = body.replace(NEGATED, '');
+  const judge = JUDGE_WORDS.filter((w) => judgeText.includes(w));
   const diaryish = DIARY_RE.test(body);
   // 打分：0 = 像纪要，越高越像日记
   let score = 0;
