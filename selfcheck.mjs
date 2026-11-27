@@ -273,7 +273,7 @@ const toolCtx = {
   tools: { register: (t) => reg.set(t.name, t) },
 };
 apply(toolCtx, paths);
-ok(reg.size === 40, '注册了 40 个工具（+ context_* / mail_* / mood_trend / work_archive / versions / restore / draft / drafts / finalize / work_project / work_move）', `实际 ${reg.size}`);
+ok(reg.size === 41, '注册了 41 个工具（+ dfy_memory_settle / context_* / mail_* / mood_trend / work_*）', `实际 ${reg.size}`);
 const missing = EXPECTED.filter((n) => !reg.has(n));
 ok(missing.length === 0, '24 个名字齐全', missing.length ? `缺 ${missing.join(',')}` : '');
 ok([...reg.values()].every((t) => typeof t.output?.render === 'function'), '每个都有 output.render');
@@ -1475,6 +1475,81 @@ console.log('\n[R] 记忆摘要（模糊 = 一句事实，不是砍尾巴）');
     '任何输入都给出 1~24 字的摘要', cases.map((c) => `${gistOf({ text: c })}(${gistOf({ text: c }).length})`).join(' | '));
   const oddEnd = cases.filter((c) => /[，、：,（(—]$/.test(gistOf({ text: c })));
   ok(oddEnd.length === 0, '摘要不以半个标点结尾', oddEnd.join(' | '));
+}
+
+console.log('\n[S] 「这段时间重要」：settle / until（2026-11-27）');
+{
+  const { createMemoryFacade, resolvePaths } = await import('./index.js');
+  const sDir = path.join(tmp, 'state-settle');
+  const sPaths = { ...paths, memoryDir: path.join(tmp, 'mem-settle') };
+  fs.mkdirSync(sPaths.memoryDir, { recursive: true });
+  const sf = createMemoryFacade(sPaths);
+
+  // 写作期间的设定：important + 属于「白饭派」
+  const w1 = sf.memory.add({ text: '白饭派前传的师父不抽烟不喝酒', tier: 'important', project: '白饭派', tags: ['白饭派'] }).entry;
+  const w2 = sf.memory.add({ text: '白饭派回目：断线、收人、缺口碗', tier: 'important', project: '白饭派' }).entry;
+  // 她对自己的新认知：core，永远不降
+  const self1 = sf.memory.add({ text: '记录自己时必须是真实的，不为讨好而写', tier: 'core', tags: ['原则'] }).entry;
+  // 无关的 important
+  const other = sf.memory.add({ text: '他答应周末陪我去看海', tier: 'important', tags: ['约定'] }).entry;
+
+  ok(sf.memory.tier(w1.id) === 'important', 'settle 前：设定是 important');
+  const r = sf.memory.settle({ project: '白饭派' });
+  ok(r.settled === 2, '按项目 settle → 2 条（整个作品）', String(r.settled));
+  ok(sf.memory.tier(w1.id) === 'normal' && sf.memory.tier(w2.id) === 'normal', 'settle 后：生效层变 normal');
+  const w1raw = findIn(sPaths.memoryDir).find((e) => e.id === w1.id);
+  ok(w1raw.tier === 'important' && w1raw.settledAt > 0, '存储的 tier 没动（看得出曾经重要）', `tier=${w1raw.tier}`);
+  ok(sf.memory.tier(self1.id) === 'core', 'core 不受 settle 影响（对自己的新认知永不降）');
+  ok(sf.memory.tier(other.id) === 'important', '别的 important 不受影响');
+
+  // 幂等：再 settle 一次不重复计数
+  ok(sf.memory.settle({ project: '白饭派' }).settled === 0, 'settle 幂等（已经降过的不再算）');
+
+  // 不给条件 → 拒绝（不猜）
+  let threw = null;
+  try { sf.memory.settle({}); } catch (e) { threw = e; }
+  ok(threw && /其中一个/.test(threw.message), '不给条件 → 拒绝（免得一次把整个库降级）');
+
+  // settle 后按 normal 的时钟走：7 天后模糊（原来 important 是 14 天）
+  const DAYs = 24 * 60 * 60 * 1000;
+  const lcSettled = sf.memory.lifecycle(w1.id);
+  ok(lcSettled.tier === 'normal', 'settle 后生命周期按 normal 算', String(lcSettled.tier));
+  // 直接改文件把这条往前挪 8 天 → 应该进入模糊（normal 7 天）
+  {
+    const doc = JSON.parse(fs.readFileSync(path.join(sPaths.memoryDir, 'memory.json'), 'utf8'));
+    const e = doc.entries.find((x) => x.id === w1.id);
+    const ago = Date.now() - 8 * DAYs;
+    e.createdAt = ago; e.updatedAt = ago; e.lastRecalledAt = ago;
+    fs.writeFileSync(path.join(sPaths.memoryDir, 'memory.json'), JSON.stringify(doc, null, 2), 'utf8');
+  }
+  sf.memory.maintain();
+  const afterSettle = findIn(sPaths.memoryDir).find((e) => e.id === w1.id);
+  ok(afterSettle && afterSettle.blurStage === 1, 'settle 后 8 天 → 已模糊（normal 的节奏）', String(afterSettle?.blurStage));
+
+  // unsettle 撤销
+  const un = sf.memory.unsettle({ project: '白饭派' });
+  ok(un.unsettled === 2, 'unsettle → 2 条回来', String(un.unsettled));
+  ok(sf.memory.tier(w1.id) === 'important', '撤销后回到 important');
+
+  // until：写的时候带期限，过了自动降
+  const yest = new Date(Date.now() - 86400000);
+  const ymd = `${yest.getFullYear()}-${String(yest.getMonth() + 1).padStart(2, '0')}-${String(yest.getDate()).padStart(2, '0')}`;
+  const u1 = sf.memory.add({ text: '这周期末考，先别叫我出去玩', tier: 'important', until: ymd }).entry;
+  ok(sf.memory.tier(u1.id) === 'normal', 'until 过了 → 自动按 normal 算', ymd);
+  const tomorrow = new Date(Date.now() + 86400000);
+  const ymdT = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1).padStart(2, '0')}-${String(tomorrow.getDate()).padStart(2, '0')}`;
+  const u2 = sf.memory.add({ text: '这周在赶论文', tier: 'important', until: ymdT }).entry;
+  ok(sf.memory.tier(u2.id) === 'important', 'until 还没到 → 仍然是 important', ymdT);
+
+  // 重新记一遍（带 until）= 这段又开始了 → 撤掉 settle
+  sf.memory.settle({ project: '白饭派' });
+  ok(sf.memory.tier(w1.id) === 'normal', '前提：又 settle 了');
+  sf.memory.add({ text: '白饭派前传的师父不抽烟不喝酒', tier: 'important', project: '白饭派', until: ymdT });
+  ok(sf.memory.tier(w1.id) === 'important', '又写了一遍 → 这段重新开始（settle 撤销）');
+
+  // 归档：settle 过的 core 不会被归档（"永不淡忘"是承诺）
+  const coreSettled = findIn(sPaths.memoryDir).find((e) => e.id === self1.id);
+  ok(coreSettled && coreSettled.settledAt === undefined, 'core 从来没被 settle 过');
 }
 
 console.log(`\n通过 ${pass} / 失败 ${fail}`);
