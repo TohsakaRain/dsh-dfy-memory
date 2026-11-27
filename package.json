@@ -1,6 +1,6 @@
 {
   "name": "dsh-dfy-memory",
-  "version": "0.12.5",
+  "version": "0.12.6",
   "description": "DSH 插件：给一个人格一套会淡忘的数据层（长期记忆 / 心情·好感度 / 承诺 / 日记 / 对话窗口 / 作品库 / 邮箱），41 个 dfy_* 工具 + 一个设置页",
   "type": "module",
   "main": "index.js",
