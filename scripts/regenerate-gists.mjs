@@ -4,7 +4,9 @@
 // （blurStage 1/2）不会再被处理一次，于是它们永远停在旧的截断文本上。
 //
 // 规则：
-//   · 只动「已经是模糊态（blurStage>0）」且「正文比 hook 长」的
+//   · 只动「已经是模糊态（blurStage>0）」且「正文还不等于 hook」的
+//     ⚠️ 不要拿长度做判断：实测有一条被截成 12 字（「下午聊我是不是独一无二…」），
+//     而它的 hook 是 17 字 —— 更短不代表更好，那句截断话恰恰读不通。
 //   · 新正文 = hook（和 gistOf 一致）；textBefore 不动（原文永远留着）
 //   · 改前备份 memory.json
 //   · --dry 只看会改哪些
@@ -34,7 +36,6 @@ for (const e of entries) {
   if (!next) continue;                                // 没 hook 的不动
   const cur = String(e.text ?? '');
   if (next === cur) continue;                         // 已经是那句了
-  if (next.length >= cur.length) continue;            // 不会更长（安全）
   changes.push({ id: e.id, tier: e.tier, stage: e.blurStage, from: cur, to: next });
   if (!dry) e.text = next;
 }
