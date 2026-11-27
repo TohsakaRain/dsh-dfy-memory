@@ -1,7 +1,7 @@
 # dsh-dfy-memory
 
 > 给大肥鱼一套**会淡忘**的人格数据层：长期记忆 / 心情·好感 / 承诺 / 日记。
-> 一个 DeepSeek Harness（DSH）插件，40 个工具 + 一个设置页。
+> 一个 DeepSeek Harness（DSH）插件，41 个工具 + 一个设置页。
 
 不是向量库，也不是"把聊天记录全存下来"。它模仿的是**人的记性**：
 
@@ -109,12 +109,12 @@ DFY_DATA_DIR=D:\my\dsh-data
 
 ---
 
-## 40 个工具
+## 41 个工具
 
 | 组 | 工具 | 说明 |
 |---|---|---|
 | **日记** | `dfy_diary_write` / `dfy_diary_read` / `dfy_diary_list` | 一天可写多段；写出去不能删 |
-| **记忆** | `dfy_memory_save` / `dfy_memory_recall` / `dfy_memory_touch` / `dfy_memory_update` / `dfy_memory_forget` / `dfy_memory_stats` | 存 / 想起来 / 强化 / 改 / 淡忘 / 统计 |
+| **记忆** | `dfy_memory_save` / `dfy_memory_recall` / `dfy_memory_touch` / `dfy_memory_update` / `dfy_memory_forget` / `dfy_memory_settle` / `dfy_memory_stats` | 存 / 想起来 / 强化 / 改 / 淡忘 / **这段已经过了** / 统计 |
 | **心情** | `dfy_mood` / `dfy_mood_trend` / `dfy_mood_search` / `dfy_affinity` | 记或查当前心情、按天走势、按关键词查历史、心里的秤 |
 | **承诺** | `dfy_promise` / `dfy_promises` / `dfy_promise_drop` | 答应过的事（到点提醒归宿主） |
 | **对话窗口** | `dfy_context_get` / `dfy_context_list` / `dfy_context_raw` / `dfy_context_search` / `dfy_context_summarize` / `dfy_context_digest` | 读摘要 / 读原始记录 / 跨天全文搜 / 自己重写摘要 / 周月压缩 |
@@ -279,12 +279,12 @@ GET http://127.0.0.1:<DSH端口>/api/dfy-memory/prompt-block
 ## 自检
 
 ```powershell
-node selfcheck.mjs     # 426 项，全用临时目录，不碰真实数据
+node selfcheck.mjs     # 443 项，全用临时目录，不碰真实数据
 ```
 
 覆盖：路径解析、记忆（写入/判重/召回/分层/touch/恢复原文/渲染/注入文本/生命周期）、
 心情（三层衰减/好感度联动）、承诺、日记、对话窗口（含跨天搜）、作品库（草稿/定稿/归档/对账）、
-工具注册（40 个名字 + schema 形状 + 返回值类型）。
+工具注册（41 个名字 + schema 形状 + 返回值类型）。
 
 ---
 
@@ -296,7 +296,7 @@ node selfcheck.mjs     # 426 项，全用临时目录，不碰真实数据
    ▼                                  ▼
 ┌─────────────────────────────────────────────────┐
 │ dsh-dfy-memory                                   │
-│  index.js      40 个工具（薄封装，逻辑在 lib/）   │
+│  index.js      41 个工具（薄封装，逻辑在 lib/）   │
 │  lib/memory-store.js   分层 + 遗忘曲线 + 打分     │
 │  lib/emotion.js        心情衰减 + 好感度          │
 │  lib/commitments.js    承诺                      │
@@ -558,9 +558,33 @@ node selfcheck.mjs     # 426 项，全用临时目录，不碰真实数据
 - 删除死参数 `blurChars` / `blurFinalChars`（模糊不再按字数）
 - 自检 **412 → 426** 条（摘要形态、检索链、归档回落各补了断言）
 
+### 0.12.3（2026-11-27）
+
+**「这段时间重要」—— 写作品时的设定，写完了就该让位。**
+
+以前的记忆只有两个变量：写入时定的 `tier`（写死）+ `mentionBonus`（只增不减）。
+于是「白饭派前传的师父不抽烟」「回目规划」这些**写作期间很重要**的设定，
+连载写完了还按 important 的 14 天半衰期慢慢淡，继续占注入位 —— 把新东西挤掉。
+而她自己「对自己有了新认知」这种事，才是真正该是 core 的。
+
+- **新增 `dfy_memory_settle`（第 41 个工具）**：把一批记忆标成「这段已经过了」。
+  可按 `project`（整个作品）/ `ids` / `tags` / `query` 选；`action="unsettle"` 撤销。
+  - **不删、不改存储的 tier** —— 只写 `settledAt`，生效层当作 `normal`（7 天模糊、再 7 天归档）。
+    存储里仍然是 important，看得出「它曾经重要过」；原文留着，想起来还会变清楚
+  - **core 不参与**：那是「永不淡忘」的承诺，settle 只适用于「这段时间重要」
+  - 三个条件都不给 → **拒绝**（不猜，免得一次把整个库降级）
+- **新增 `until` 参数**（`dfy_memory_save` / `dfy_memory_update`）：`YYYY-MM-DD`，
+  过了这天自动按 normal 算。「这周期末考」这种有明确期限的事不用等到想起来才降
+- **新增 `project` 字段**（同上）：给记忆挂到作品上，`dfy_work_finalize` 定稿时会提示
+  「这个项目还有 N 条记忆挂在 important 上」（只提示，不自动降 —— 可能接着写下一部）
+- 重新写一遍同一条记忆（或重新给 `until`）= 这段又开始了 → 自动撤掉 settle
+- `dfy_memory_recall` 里 settle 过的条目标成 `normal·原important`；
+  `dfy_memory_stats` 单独报一句「其中 N 条已经过了」；`memory.md` 里标「这段已经过了（原 important）」
+- 自检 **426 → 443** 条（settle / until / 生效层 / 幂等 / core 豁免）
+
 ## 版本
 
-**0.12.2**（模糊 = 一句事实；检索链补 `textBefore` 与归档全文回落；自检 426 条）。仓库每个版本一条分支（`0.7.0`、`0.8.0`、`0.8.1`…）加一个同名 tag（`v0.8.1`），
+**0.12.3**（「这段时间重要」：settle + until；自检 443 条）。仓库每个版本一条分支（`0.7.0`、`0.8.0`、`0.8.1`…）加一个同名 tag（`v0.8.1`），
 `git diff v0.8.0 v0.8.1` 就是两版之间的全部差异。发布流程见 `CONTRIBUTING.md`。
 
 ## License

@@ -30,7 +30,7 @@ import {
   loadStore, saveStore, addMemory, recallMemories, touchMemory, updateMemory,
   forgetMemory, statsMemories, recallForPrompt, renderMarkdown, TIERS, DEFAULT_TUNING,
   maintainMemories, lifecycleOf, blurText, pendingDigestDays, tuningFromCfg, isVague,
-  touchMany, exportMarkdown,
+  touchMany, exportMarkdown, settleMemories, unsettleMemories, tierOf, isSettled, gistOf,
 } from './lib/memory-store.js';
 import { mailboxDir, sendLetter, listLetters, readLetter, mailStats } from './lib/mailbox.js';
 import { DEFAULT_SELF_INJECT, SETTINGS_REL, resolveSelfInject, wireSelfInject } from './lib/inject-self.js';
@@ -160,6 +160,16 @@ export function createMemoryFacade(paths, opts = {}) {
         return e ? lifecycleOf(e, tuningFromCfg(cfgProvider())) : null;
       },
       blur: blurText,
+      /** 模糊之后留在正文位置上的一句事实（设置页 / 诊断用）。 */
+      gist: gistOf,
+      /** 现在真正生效的层（settle / until 到期 → normal；存储的 tier 不变）。 */
+      tier: (id, now = Date.now()) => {
+        const e = loadStore(paths.memoryDir).entries.find((x) => x.id === id);
+        return e ? tierOf(e, now) : null;
+      },
+      /** 「这段已经过了」：写完的作品 / 到期的时段，按项目或标签一次性降级。 */
+      settle: (opts) => settleMemories(paths.memoryDir, opts, tuningFromCfg(cfgProvider())),
+      unsettle: (opts) => unsettleMemories(paths.memoryDir, opts, tuningFromCfg(cfgProvider())),
       tiers: TIERS,
       tuning: DEFAULT_TUNING,
     },
@@ -406,23 +416,35 @@ export function registerTools(ctx, facade, log = () => {}) {
       + '**当天发生的事，正文里不要再写日期** —— 外面会自动标出写下那天；只有**补记**（事后补录以前的事）才在正文开头写日期，因为那时候两个日期不一样。',
     parameters: {
       text: { type: 'string', description: '要记住的那件事，一句话写清（谁、什么事、什么时候）。**当天的事不要自己再写日期**（外面会标）；补记以前的事才在开头写「YYYY-MM-DD 」' },
-      tier: { type: 'string', description: '重要性，分三层：\ncore = 名字/身份/承诺/约定/大事（永不淡忘）\nimportant = 有情绪、有后续的事；让他改变看法的事、他反复提的事\nnormal = 日常琐事（吃饭/天气/临时安排）—— **不确定就选这个**\n\n注意：标得越高越占注入位。日常琐事标 important，会把真正重要的事挤掉。' },
+      tier: { type: 'string', description: '重要性，分三层：\ncore = 名字/身份/承诺/约定/大事（永不淡忘）\nimportant = 有情绪、有后续的事；让他改变看法的事、他反复提的事\nnormal = 日常琐事（吃饭/天气/临时安排）—— **不确定就选这个**\n\n注意：标得越高越占注入位。日常琐事标 important，会把真正重要的事挤掉。\n⚠️ 「这段时间重要」的东西（比如正在写的作品的设定）别标 core —— 事办完了它就不重要了。用 important，再用 dfy_memory_settle 在写完时降下来。' },
       who: { type: 'string', description: '和谁有关（QQ 号或昵称）' },
       tags: { type: 'string', description: '标签，逗号分隔，如「约定,游戏」' },
       quote: { type: 'string', description: '可选：当时的**一句原话**（谁说的都行，尽量一字不改）' },
-      hook: { type: 'string', description: '可选，但**建议写**：一句话能把这整件事拉出来（≤24 字）。淡忘之后正文就只剩这一句——写不好以后就想不起来了' },
+      hook: {
+        type: 'string',
+        description: '可选，但**建议写**：这件事的一句话摘要（≤24 字）。淡忘之后正文就只剩这一句——写不好以后就想不起来了。\n'
+          + '⚠️ **用第三人称、只写事实**：写「她的名字是圆子」「他答应周末陪她」，别写「他问我叫什么，我说圆子」'
+          + '（那是日记的写法，带场景和第一人称，不适合当索引）。也不要写评价（「他说话不算数」）——'
+          + '评价会过期，事实不会。',
+      },
       refs: { type: 'string', description: '可选：出处，逗号分隔（日期 2026-11-03 / 那天的窗口）' },
+      project: { type: 'string', description: '可选：这件事属于哪个作品/项目（如「白饭派」）。填了才能用 dfy_memory_settle 按项目一次性降级' },
+      until: { type: 'string', description: '可选：这件事重要到什么时候，YYYY-MM-DD。过了这天自动按日常琐事淡忘（「这段时间重要」）。不填 = 没有期限' },
     },
     async execute(args) {
       const tags = String(args.tags ?? '').split(/[,，]/).map((s) => s.trim()).filter(Boolean);
       const refs = String(args.refs ?? '').split(/[,，]/).map((s) => s.trim()).filter(Boolean);
-      const r = f.memory.add({ text: args.text, tier: args.tier, who: args.who, tags, quote: args.quote, hook: args.hook, refs });
+      const r = f.memory.add({
+        text: args.text, tier: args.tier, who: args.who, tags, quote: args.quote, hook: args.hook, refs,
+        project: args.project, until: args.until,
+      });
       if (!r?.entry) return '没存成：记忆内容是空的。';
       const warned = !String(args.hook ?? '').trim() && String(args.text ?? '').trim().length > 24
         ? '\n（没写钩子，淡忘后正文会退化成从开头截的一句——想让它以后还好翻的话，用 dfy_memory_update 补一个 hook）'
         : '';
-      if (r.duplicate) return `这条已经记过了（${r.entry.id}），我把它更新了一下。${warned}`;
-      return `记住了 ✓ ${r.entry.id} ［${r.entry.tier}］${r.entry.text}${warned}`;
+      const timeboxed = r.entry.until ? `\n（这段重要到 ${r.entry.until}，过了按日常琐事淡忘）` : '';
+      if (r.duplicate) return `这条已经记过了（${r.entry.id}），我把它更新了一下。${warned}${timeboxed}`;
+      return `记住了 ✓ ${r.entry.id} ［${r.entry.tier}］${r.entry.text}${warned}${timeboxed}`;
     },
   });
 
@@ -453,7 +475,10 @@ export function registerTools(ctx, facade, log = () => {}) {
 
       const lines = items.map((e) => {
         const vague = isVague(e) ? '　［这条已经模糊了，只剩个大概］' : '';
-        const head = `- ${e.id} ［${e.tier}］${e.text}${vague}`;
+        // 生效层（settle 过的按 normal 算），但把原来的层也标出来 —— 看得出它曾经重要过
+        const eff = tierOf(e);
+        const tierTag = isSettled(e) && e.tier !== eff ? `${eff}·原${e.tier}` : e.tier;
+        const head = `- ${e.id} ［${tierTag}］${e.text}${vague}`;
         const hook = e.hook ? `\n    钩子：${e.hook}` : '';
         const quote = e.quote ? `\n    原话：${e.quote}` : '';
         const refs = Array.isArray(e.refs) && e.refs.length ? `\n    出处：${e.refs.join('、')}` : '';
@@ -505,8 +530,52 @@ export function registerTools(ctx, facade, log = () => {}) {
   });
 
   tool({
+    name: 'dfy_memory_settle',
+    description: '「这段时间重要、过去了就不重要了」—— 把记忆降级成日常（**不删、不丢原文**）。\n'
+      + '典型场景：你写作品时那些设定、回目、人物关系，写的时候要一直在；写完了它们就该让位给别的。\n'
+      + '降级后：按 normal 的节奏淡（7 天模糊、再 7 天归档），存储的 important 标记不动 —— 以后翻得到，\n'
+      + '只是不再每轮都占注入位。想起来（dfy_memory_recall / dfy_memory_touch）仍然会变清楚。\n'
+      + '⚠️ core 不会被降级（那是「永不淡忘」的承诺）。你说的「对自己的新认知」该是 core，不是这里的。\n'
+      + 'action="unsettle" 撤销 —— 这段又开始了。',
+    parameters: {
+      action: { type: 'string', enum: ['settle', 'unsettle'], description: 'settle（默认）= 降级；unsettle = 撤销' },
+      project: { type: 'string', description: '可选：这个作品/项目的全部记忆（写完了最常用），如 "白饭派"' },
+      ids: { type: 'array', items: { type: 'string' }, description: '可选：指定几条（dfy_memory_recall 返回的 id）' },
+      tags: { type: 'array', items: { type: 'string' }, description: '可选：带这些标签的（任一命中）' },
+      query: { type: 'string', description: '可选：正文/钩子关键词（OR）' },
+    },
+    async execute(args = {}) {
+      const action = String(args.action ?? 'settle').toLowerCase() === 'unsettle' ? 'unsettle' : 'settle';
+      const ids = Array.isArray(args.ids) ? args.ids.map(String) : undefined;
+      const tags = Array.isArray(args.tags) ? args.tags.map(String) : undefined;
+      if (!ids?.length && !args.project && !tags?.length && !String(args.query ?? '').trim()) {
+        return '要说清降级哪些：project（整个作品）/ ids / tags / query 至少给一个——不猜，免得一次把整个库都降了。';
+      }
+      try {
+        const r = action === 'unsettle'
+          ? f.memory.unsettle({ ids, project: args.project, tags, query: args.query })
+          : f.memory.settle({ ids, project: args.project, tags, query: args.query });
+        const n = action === 'unsettle' ? r.unsettled : r.settled;
+        if (!n) {
+          return action === 'unsettle'
+            ? '这些都没有被 settle 过，不用撤。'
+            : '没找到符合条件的记忆（或已经全 settle 过了，core 不参与）。';
+        }
+        const head = action === 'unsettle'
+          ? `撤销了 ${n} 条（这段又开始了，回到原来的重要度）`
+          : `降级了 ${n} 条（按日常琐事淡忘；原文留着，想起来还能变清楚）`;
+        return head + '\n' + r.items.slice(0, 10).map((x) => `  · ${x.id} ［${x.tier}］${x.text}`).join('\n')
+          + (r.items.length > 10 ? `\n  …还有 ${r.items.length - 10} 条` : '');
+      } catch (e) {
+        return `没成：${e?.message ?? e}`;
+      }
+    },
+  });
+
+  tool({
     name: 'dfy_memory_forget',
-    description: '让一条记忆淡出去（删除）。core 的不能删——那是「永不淡忘」的意思，要删得先降级。别频繁用：淡忘应该是自然的，而不是你手动清理。',
+    description: '让一条记忆淡出去（删除）。core 的不能删——那是「永不淡忘」的意思，要删得先降级。别频繁用：淡忘应该是自然的，而不是你手动清理。\n'
+      + '⚠️ 只是「这段不重要了」用 dfy_memory_settle（不删原文）；这个是真的抹掉。',
     parameters: { id: { type: 'string', description: '记忆 ID' } },
     async execute(args) {
       const r = f.memory.forget(args.id);
@@ -523,12 +592,15 @@ export function registerTools(ctx, facade, log = () => {}) {
       const s = f.memory.stats();
       const tiers = s.byTier || {};
       const a = f.archive.stats();
+      // settle 过的：存储的 tier 还在，但已经按 normal 算 —— 单独报一句，免得"core 11 条"看着吓人
+      const settled = (f.memory.recall({ limit: 50 }) || []).filter(isSettled).length;
       return [
         `共 ${s.total} 条`,
         `core ${tiers.core ?? 0} / important ${tiers.important ?? 0} / normal ${tiers.normal ?? 0}`,
+        settled ? `其中 ${settled} 条「这段已经过了」（按日常淡忘，翻得到）` : '',
         s.fading?.length ? `快淡掉的：${s.fading.slice(0, 5).map((e) => String(e.text).slice(0, 20)).join('；')}` : '没有快淡掉的',
         a.total ? `归档里还有 ${a.total} 条（${a.first ?? '?'} ~ ${a.last ?? '?'}）` : '归档是空的',
-      ].join('\n');
+      ].filter(Boolean).join('\n');
     },
   });
 
@@ -1355,8 +1427,18 @@ export function registerTools(ctx, facade, log = () => {}) {
       if (p.error) return p.error;
       const r = f.works.finalize({ title, category: args.category, project: p.name, sub: args.sub });
       if (!r.finalized) return `没定稿：${r.reason ?? '未知原因'}`;
+      // 「这段时间重要」的联动：定稿 = 这个作品告一段落 → 提醒她把相关记忆降级。
+      // 不自动做：同一批设定可能接着写下一部，降不降由她判断（settle 可撤销）。
+      const settleHint = (() => {
+        try {
+          const rows = f.memory.recall({ limit: 50 }) || [];
+          const n = rows.filter((e) => e.project === p.name && !isSettled(e)).length;
+          return n ? `\n\n（这个项目还有 ${n} 条记忆挂在 important 上。作品告一段落的话，用 dfy_memory_settle(project="${p.name}") 把它们降下来——不删原文，想起来还能变清楚）` : '';
+        } catch { return ''; }
+      })();
       return `定稿了 ✓「${r.work.title}」→ ${r.work.category}/${r.work.file}`
-        + (r.draftsKept ? `\n（${r.draftsKept} 份草稿还留在 ${r.work.project}/drafts/ 里，没动）` : '');
+        + (r.draftsKept ? `\n（${r.draftsKept} 份草稿还留在 ${r.work.project}/drafts/ 里，没动）` : '')
+        + settleHint;
     },
   });
 
